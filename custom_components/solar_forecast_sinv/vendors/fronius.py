@@ -21,6 +21,9 @@ Premium HV and Smartmeter IP at the grid point (2026-10-11):
 - energies in Wh -> converted to kWh
 - ``TOTAL_ENERGY``/``E_Total`` is the inverter AC energy (includes battery
   discharge on hybrids), so it is not ``energy_solar_total``
+With Modbus TCP enabled on a GEN24 the coordinator adds SunSpec model 160
+(``sunspec_mppt``): the PV trackers give ``energy_solar_total`` and measured
+per-MPPT power, the battery port gives the battery energy counters.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..contract import indexed_role
+from . import sunspec
 
 VENDOR = "fronius"
 NAME = "Fronius"
@@ -256,7 +260,28 @@ def build_devices(responses: dict[str, Any]) -> dict[str, FroniusDevice]:
     battery = _battery(_data(responses.get("storage")), site, flow_inverter)
     if battery is not None:
         devices[battery.serial] = battery
+    _apply_sunspec(inverter, battery, responses.get("sunspec_mppt") or [])
     return devices
+
+
+def _apply_sunspec(
+    inverter: FroniusDevice, battery: FroniusDevice | None, modules: list[Any]
+) -> None:
+    """Add SunSpec model 160 values; unfilled models change nothing. @zara"""
+    solar = sunspec.pv_energy_kwh(modules)
+    if solar is None:
+        return
+    _set(inverter, "energy_solar_total", solar, 3)
+    for module in modules:
+        if not module.is_pv or module.power is None or module.index > MAX_MPPT:
+            continue
+        role = indexed_role("power_solar_mppt", module.index)
+        _set(inverter, role, module.power, 0)
+        inverter.derived.discard(role)
+    counters = sunspec.battery_energy_kwh(modules)
+    if battery is not None and counters is not None:
+        _set(battery, "energy_battery_charge_total", counters[0], 3)
+        _set(battery, "energy_battery_discharge_total", counters[1], 3)
 
 
 def _grid_roles(device: FroniusDevice, grid: float) -> None:

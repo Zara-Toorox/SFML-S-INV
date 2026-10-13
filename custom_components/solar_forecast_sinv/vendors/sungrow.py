@@ -25,7 +25,9 @@ Documented signs used directly:
   contract ``power_battery`` (positive charging) = -5214
 Firmware without 5214 only has the unsigned 13022; its direction comes from the
 charge/discharge bits of the power flow status 13001. Grid and load values are
-only valid with a smart meter connected directly to the inverter.
+only valid with a smart meter connected directly to the inverter; without one the
+inverter reports them as 0, so they are published only once the meter shows any
+power or energy. Behind an iHomeManager they describe the whole house.
 """
 
 from __future__ import annotations
@@ -280,9 +282,11 @@ def build_devices(regs: dict[int, int]) -> dict[str, SungrowDevice]:
     _set(device, "power_solar", u32(regs, 5017), 0)
     _set(device, "power_inverter_ac_output", s32(regs, 13034), 0)
     _set(device, "temperature_inverter", _scaled(s16(regs, 5008), 10))
-    # output type 2 (3P3L) reports line voltages only
-    if u16(regs, 5002) in (0, 1):
-        _set(device, "voltage_grid", _scaled(u16(regs, 5019), 10))
+    # output type 2 (3P3L) reports line voltages only; an iHomeManager may report
+    # line voltages for 3P4L too, which are dropped instead of being converted
+    voltage = _scaled(u16(regs, 5019), 10)
+    if u16(regs, 5002) in (0, 1) and voltage is not None and 180 <= voltage <= 280:
+        _set(device, "voltage_grid", voltage)
     frequency = _scaled(u16(regs, 5242), 100)
     if frequency is None:
         frequency = _scaled(u16(regs, 5036), 10)
@@ -292,12 +296,15 @@ def build_devices(regs: dict[int, int]) -> dict[str, SungrowDevice]:
 
     # grid point and load need a smart meter connected directly to the inverter
     grid = s32(regs, 5601)
-    if grid is not None:
+    imported = u32(regs, 13037)
+    exported = u32(regs, 13046)
+    # without a meter every grid value reads 0, which must not pass as a balance
+    if grid is not None and (grid or imported or exported):
         _set(device, "power_grid", grid, 0)
         _set(device, "power_grid_import", max(0, grid), 0)
         _set(device, "power_grid_export", max(0, -grid), 0)
-        _set(device, "energy_grid_import_total", _scaled(u32(regs, 13037), 10), 1)
-        _set(device, "energy_grid_export_total", _scaled(u32(regs, 13046), 10), 1)
+        _set(device, "energy_grid_import_total", _scaled(imported, 10), 1)
+        _set(device, "energy_grid_export_total", _scaled(exported, 10), 1)
         load = s32(regs, 13008)
         if load is not None:
             _set(device, "power_house", max(0, load), 0)

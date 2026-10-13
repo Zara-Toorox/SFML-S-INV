@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+import struct
+import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
 from homeassistant.config_entries import ConfigEntry
@@ -23,9 +26,18 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import LOGGER
-from .vendors import fronius
+from .modbus_tcp import READ_HOLDING_REGISTERS, ModbusError, ModbusTcpClient
+from .vendors import fronius, sunspec
 
 REQUEST_TIMEOUT = ClientTimeout(total=10)
+CONF_MODBUS = "modbus"
+MODBUS_DEFAULT = True
+MODBUS_PORT = 502
+MODBUS_UNIT_ID = 1
+MODBUS_TIMEOUT_SECONDS = 10
+# a closed port or a device without model 160 is asked again only after this
+MODBUS_RETRY_SECONDS = 3600
+MODBUS_ERRORS = (OSError, TimeoutError, EOFError, ModbusError, struct.error)
 
 
 def base_url(host: str) -> str:
@@ -79,6 +91,10 @@ class FroniusCoordinator(DataUpdateCoordinator[dict[str, fronius.FroniusDevice]]
         self.host: str = entry.data[CONF_HOST]
         self._session = async_get_clientsession(hass)
         self._api: str | None = None
+        self._modbus = bool(entry.options.get(CONF_MODBUS, MODBUS_DEFAULT))
+        # (wire address, length) of model 160 once found
+        self._mppt_model: tuple[int, int] | None = None
+        self._modbus_retry_at = 0.0
 
     async def _async_update_data(self) -> dict[str, fronius.FroniusDevice]:
         try:
@@ -116,4 +132,67 @@ class FroniusCoordinator(DataUpdateCoordinator[dict[str, fronius.FroniusDevice]]
             responses[key] = result
         if "powerflow" not in responses and "inverter" not in responses:
             raise UpdateFailed(f"Fronius at {self.host} returned no realtime data")
+        if self._modbus and time.monotonic() >= self._modbus_retry_at:
+            modules = await self._async_read_mppt_model()
+            if modules:
+                responses["sunspec_mppt"] = modules
         return fronius.build_devices(responses)
+
+    async def _async_read_mppt_model(self) -> list[sunspec.Module]:
+        """Read SunSpec model 160 over Modbus TCP; never fails the cycle. @zara"""
+        try:
+            host = fronius_host(self.host)
+            async with (
+                asyncio.timeout(MODBUS_TIMEOUT_SECONDS),
+                ModbusTcpClient(host, MODBUS_PORT, MODBUS_UNIT_ID, timeout=5) as client,
+            ):
+                if self._mppt_model is None:
+                    self._mppt_model = await _find_model(client, sunspec.MPPT_MODEL)
+                if self._mppt_model is None:
+                    raise ModbusError("no SunSpec model 160")
+                address, length = self._mppt_model
+                block = await client.read(
+                    address, min(length + 2, 125), READ_HOLDING_REGISTERS
+                )
+            modules = sunspec.parse_mppt(block)
+        except (*MODBUS_ERRORS, ValueError, OverflowError) as err:
+            LOGGER.debug("Fronius %s Modbus TCP not used: %s", self.host, err)
+            self._mppt_model = None
+            self._modbus_retry_at = time.monotonic() + MODBUS_RETRY_SECONDS
+            return []
+        if sunspec.pv_energy_kwh(modules) is None:
+            # model 160 present but not filled (Datamanager): ask again much later
+            self._modbus_retry_at = time.monotonic() + MODBUS_RETRY_SECONDS
+            return []
+        return modules
+
+
+def fronius_host(host: str) -> str:
+    """Host of the Solar API address for the Modbus connection. @zara
+
+    Parsed like the HTTP request (user info, port and path dropped), so Modbus
+    always goes to the same machine as the Solar API.
+    """
+    try:
+        hostname = urlsplit(base_url(host)).hostname
+    except ValueError:
+        hostname = None
+    if not hostname:
+        raise ValueError("no host in the Fronius address")
+    return hostname
+
+
+async def _find_model(client: ModbusTcpClient, model_id: int) -> tuple[int, int] | None:
+    """Walk the SunSpec model chain and return (address, length) of a model. @zara"""
+    marker = await client.read(sunspec.SUNS_ADDRESS, 2, READ_HOLDING_REGISTERS)
+    if not sunspec.is_sunspec(marker):
+        return None
+    address = sunspec.CHAIN_START
+    for _ in range(sunspec.MAX_MODELS):
+        current, length = await client.read(address, 2, READ_HOLDING_REGISTERS)
+        if current == sunspec.CHAIN_END:
+            return None
+        if current == model_id:
+            return address, length
+        address += length + 2
+    return None

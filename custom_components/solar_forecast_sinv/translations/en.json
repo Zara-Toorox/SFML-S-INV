@@ -298,7 +298,7 @@
                 },
                 "data_description": {
                     "host": "Address of the inverter or WiNet-S, for example 192.168.1.96",
-                    "unit_id": "Default 1"
+                    "unit_id": "1 by default. With a WiNet-S serving several devices, use the inverter's address from the WiNet-S web interface (\"Connected devices\")."
                 }
             },
             "huawei": {
@@ -370,10 +370,12 @@
                 "description": "Change usage of hub configuration",
                 "data": {
                     "exclude": "Excluded entity categories",
-                    "scan_interval": "Polling interval (seconds)"
+                    "scan_interval": "Polling interval (seconds)",
+                    "modbus": "Also read via Modbus TCP (GEN24)"
                 },
                 "data_description": {
-                    "exclude": "Depending on selected (= excluded) entity categories, the number of Api requests can be reduced (especially for energy categories)"
+                    "exclude": "Depending on selected (= excluded) entity categories, the number of Api requests can be reduced (especially for energy categories)",
+                    "modbus": "Additionally reads the SunSpec values of a GEN24: PV lifetime energy, measured power per MPPT and the battery energy counters. Modbus TCP must be enabled on the inverter (Communication → Modbus, port 502). S-INV only reads. If Modbus is not reachable, the Solar API values are used alone."
                 },
                 "sections": {
                     "api_options": {
@@ -449,7 +451,7 @@
                     "install_count": "Take part in the BETA test (anonymous install count)"
                 },
                 "data_description": {
-                    "install_count": "On by default during the BETA, can be switched off at any time. When on, only the installed version number (e.g. “S-INV 2.0.0”) is sent to solarforecastml.com once a day – no device- or user-specific data, no identifier, no measured values. Only how often each version was reported per day is stored. Your IP address is technically visible in transit and kept as an encrypted hash for abuse protection for at most two days. Details: https://www.solarforecastml.com/en/privacy"
+                    "install_count": "On by default during the BETA, can be switched off at any time. When on, only the installed version number (e.g. “S-INV 2.0.2”) is sent to solarforecastml.com once a day – no device- or user-specific data, no identifier, no measured values. Only how often each version was reported per day is stored. Your IP address is technically visible in transit and kept as an encrypted hash for abuse protection for at most two days. Details: https://www.solarforecastml.com/en/privacy"
                 },
                 "description": "Energy dashboard: add the sensors of this device yourself under Settings → Dashboards → Energy – grid consumption `sensor.sinv_energy_grid_import_total`, return to grid `sensor.sinv_energy_grid_export_total`, solar production `sensor.sinv_energy_solar_total`, battery in `sensor.sinv_energy_battery_charge_total`, battery out `sensor.sinv_energy_battery_discharge_total`. Use only these installation sensors, otherwise energy is counted twice."
             }

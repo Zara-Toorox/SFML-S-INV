@@ -98,7 +98,7 @@ from .const import (
     VENDOR_ZENDURE,
 )
 from .ahoy_coordinator import async_probe as async_probe_ahoy
-from .fronius_coordinator import async_probe
+from .fronius_coordinator import CONF_MODBUS, MODBUS_DEFAULT, async_probe
 from .hoymiles_dtu_coordinator import async_probe as async_probe_hoymiles_dtu
 from .huawei_coordinator import async_probe as async_probe_huawei
 from .install_counter import CONF_INSTALL_COUNT, INSTALL_COUNT_DEFAULT
@@ -922,17 +922,20 @@ class LocalOptionsFlowHandler(ExternalMeterOptionsMixin, config_entries.OptionsF
         current = self.config_entry.options.get(
             CONF_SCAN_INTERVAL, module.DEFAULT_SCAN_SECONDS
         )
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_SCAN_INTERVAL, default=current): vol.All(
-                        vol.Coerce(int),
-                        vol.Range(min=getattr(module, "MIN_SCAN_SECONDS", 5), max=300),
-                    )
-                }
-            ),
-        )
+        fields: dict[Any, Any] = {
+            vol.Required(CONF_SCAN_INTERVAL, default=current): vol.All(
+                vol.Coerce(int),
+                vol.Range(min=getattr(module, "MIN_SCAN_SECONDS", 5), max=300),
+            )
+        }
+        if module is fronius:
+            fields[
+                vol.Required(
+                    CONF_MODBUS,
+                    default=self.config_entry.options.get(CONF_MODBUS, MODBUS_DEFAULT),
+                )
+            ] = bool
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields))
 
 
 class AnkerSolixOptionsFlowHandler(
@@ -1322,6 +1325,12 @@ class SiteOptionsFlowHandler(config_entries.OptionsFlow):
     """Options of the installation: anonymous install count. @zara"""
 
     async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.FlowResult:
+        """Open the installation options. @zara"""
+        return await self.async_step_site(user_input)
+
+    async def async_step_site(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.FlowResult:
         """Switch the anonymous daily install count on or off. @zara"""

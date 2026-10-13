@@ -54,9 +54,15 @@ INPUT_BLOCKS: tuple[tuple[int, int], ...] = (
 OPTIONAL_BLOCKS: tuple[tuple[int, int], ...] = (
     (37700, 1),  # BMS2 online
     (38307, 27),  # BMS2 values
+    (39424, 1),  # battery SoC of the device
 )
-MPPT_BASE = 39327  # voltage, current, power (I32) per MPPT, 4 registers each
-MAX_MPPTS = 4
+# the four PV inputs: voltage/current interleaved from 39070, power (I32) from 39279;
+# the MPPT count register 39052 reports fewer trackers than there are inputs
+PV_INPUTS = 4
+PV_BLOCKS: tuple[tuple[int, int], ...] = (
+    (39070, 2 * PV_INPUTS),
+    (39279, 2 * PV_INPUTS),
+)
 ONLINE = 1
 
 
@@ -133,16 +139,6 @@ def text(regs: dict[int, int], address: int, count: int) -> str:
     return data.split(b"\x00", 1)[0].decode("ascii", "ignore").strip()
 
 
-def mppt_count(regs: dict[int, int]) -> int:
-    """Return the number of MPPTs the device reports, at most four. @zara"""
-    return max(0, min(u16(regs, 39052) or 0, MAX_MPPTS))
-
-
-def mppt_blocks(count: int) -> tuple[tuple[int, int], ...]:
-    """Register block of the MPPT values. @zara"""
-    return ((MPPT_BASE, 4 * count),) if count else ()
-
-
 def identity(regs: dict[int, int]) -> dict[str, str] | None:
     """Return serial and model from the identity registers, or None. @zara"""
     # the serial ends up in unique ids and logs: keep plain ASCII letters and digits
@@ -169,14 +165,15 @@ def _scaled(value: int | None, divisor: float) -> float | None:
 
 def _battery(
     regs: dict[int, int], base: int
-) -> tuple[float, float, float | None] | None:
-    """(capacity kWh, SoC %, SoH %) of one BMS, or None when it is empty. @zara"""
+) -> tuple[float | None, int | None, int | None]:
+    """(capacity kWh or None, SoC %, SoH %) of one online BMS. @zara"""
     design = u16(regs, base + 26)  # Wh, factor 0.1
-    soc = u16(regs, base + 3)
-    if not design or soc is None:
-        return None
     soh = u16(regs, base + 15)
-    return design * 10 / 1000, float(soc), float(soh) if soh else None
+    return (
+        design * 10 / 1000 if design else None,
+        u16(regs, base + 3),
+        soh if soh and 0 < soh <= 100 else None,
+    )
 
 
 def build_devices(regs: dict[int, int]) -> dict[str, SolakonDevice]:
@@ -191,20 +188,25 @@ def build_devices(regs: dict[int, int]) -> dict[str, SolakonDevice]:
         manufacturer=NAME,
         model=ident["model"],
     )
-    for index in range(1, mppt_count(regs) + 1):
-        base = MPPT_BASE + 4 * (index - 1)
+    for index in range(1, PV_INPUTS + 1):
+        offset = 2 * (index - 1)
         _set(
             device,
             indexed_role("voltage_solar_mppt", index),
-            _scaled(s16(regs, base), 10),
+            _scaled(s16(regs, 39070 + offset), 10),
         )
         _set(
             device,
             indexed_role("current_solar_mppt", index),
-            _scaled(s16(regs, base + 1), 100),
+            _scaled(s16(regs, 39071 + offset), 100),
             2,
         )
-        _set(device, indexed_role("power_solar_mppt", index), s32(regs, base + 2), 0)
+        _set(
+            device,
+            indexed_role("power_solar_mppt", index),
+            s32(regs, 39279 + offset),
+            0,
+        )
     _set(device, "power_solar", s32(regs, 39118), 0)  # kW x1000 = W
     active = s32(regs, 39134)
     _set(device, "power_inverter_ac_output", active, 0)
@@ -227,26 +229,31 @@ def build_devices(regs: dict[int, int]) -> dict[str, SolakonDevice]:
             device.derived.add("power_house")
 
     packs = [
-        pack
+        _battery(regs, base)
         for online, base in ((37002, 37609), (37700, 38307))
-        if u16(regs, online) == ONLINE and (pack := _battery(regs, base)) is not None
+        if u16(regs, online) == ONLINE
     ]
-    if packs:
-        capacity = sum(pack[0] for pack in packs)
-        _set(device, "capacity_battery", capacity, 2)
-        _set(
-            device,
-            "battery_soc",
-            sum(pack[0] * pack[1] for pack in packs) / capacity,
-            1,
-        )
-        health = [
-            pack[2] for pack in packs if pack[2] is not None and 0 < pack[2] <= 100
-        ]
-        if len(health) == len(packs):
+    # battery SoC register of the device itself (not in the PDF, used by Solakon's
+    # own integration); covers firmware whose BMS registers stay empty
+    device_soc = u16(regs, 39424)
+    if packs or (device_soc is not None and 0 < device_soc <= 100):
+        capacities = [pack[0] for pack in packs]
+        socs = [pack[1] for pack in packs]
+        if packs and all(capacities) and all(soc is not None for soc in socs):
+            capacity = sum(capacities)
+            _set(device, "capacity_battery", capacity, 2)
+            soc = sum(c * s for c, s in zip(capacities, socs, strict=True)) / capacity
+        elif packs and socs[0] is not None:
+            soc = socs[0]
+        else:
+            soc = device_soc
+        _set(device, "battery_soc", soc, 1)
+        health = [pack[2] for pack in packs]
+        if health and all(health):
             _set(device, "battery_soh", min(health), 0)
-        # highest cell temperature of BMS1
-        _set(device, "temperature_battery", _scaled(s16(regs, 37617), 10))
+        if u16(regs, 37002) == ONLINE:
+            # highest cell temperature of BMS1
+            _set(device, "temperature_battery", _scaled(s16(regs, 37617), 10))
         battery = s32(regs, 39162)
         if battery is not None:
             _set(device, "power_battery", battery, 0)

@@ -84,9 +84,7 @@ class SolakonCoordinator(DataUpdateCoordinator[dict[str, solakon.SolakonDevice]]
             ):
                 if not self._identity:
                     self._identity = await _read(client, solakon.IDENTITY_BLOCKS)
-                blocks = solakon.INPUT_BLOCKS + solakon.mppt_blocks(
-                    solakon.mppt_count(self._identity)
-                )
+                blocks = solakon.INPUT_BLOCKS + solakon.PV_BLOCKS
                 regs = {**self._identity, **await _read(client, blocks)}
                 for block in list(self._optional):
                     try:

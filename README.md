@@ -26,7 +26,7 @@ Status: **tested** = runs on real devices; **protocol** = built from the manufac
 | Manufacturer | Devices | Connection | You need | Status |
 |---|---|---|---|---|
 | Anker Solix | Solarbank 1–3 (A17C0, A17C1, A17C2, A17C3, A17C5), Power Dock, MI60/MI80, smart meters, PPS, X1 and more | Anker cloud + MQTT | Anker account | tested |
-| Fronius | Symo GEN24 (tested with BYD battery and Smart Meter); other inverters with Solar API such as Symo and Primo | Local network (Solar API) | IP address | tested (GEN24) |
+| Fronius | Symo GEN24 (tested with BYD battery and Smart Meter); other inverters with Solar API such as Symo and Primo | Local network (Solar API); GEN24 optionally also Modbus TCP for PV and battery energy | IP address; for the extra GEN24 values Modbus TCP enabled on the inverter | tested (GEN24) |
 | Sungrow | Hybrid inverters SH-RS, SH-RT, SH-T, SH-RL, SH-CX, MG-RL, MG-TL | Modbus TCP (LAN port or WiNet-S/S2 by cable) | IP address | tested |
 | Zendure | SolarFlow 800, 800 Plus, 800 Pro, 1600 AC+, 2400 AC, 2400 AC+, 2400 Pro | Local network (zenSDK) | IP address, "Add HEMS" in the Zendure app | protocol |
 | Hoymiles | Microinverters via OpenDTU | Local network (OpenDTU REST API) | IP address of the OpenDTU | protocol |
