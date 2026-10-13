@@ -21,6 +21,12 @@ Premium HV and Smartmeter IP at the grid point (2026-10-11):
 - energies in Wh -> converted to kWh
 - ``TOTAL_ENERGY``/``E_Total`` is the inverter AC energy (includes battery
   discharge on hybrids), so it is not ``energy_solar_total``
+Symo/Primo/Galvo behind a Fronius Datamanager report only ``UDC``/``IDC`` in
+``CommonInverterData``: ``UDC`` is the voltage of string 1, ``IDC`` the total DC
+current of all strings (verified against the archive on a Symo 4.5-3-M,
+Datamanager 3.34.1-7, 2026-10-13). For these devices the per-string values come
+from the 5-minute archive (``Voltage_DC_String_n``/``Current_DC_String_n``) and
+``UDC``/``IDC`` are not published as MPPT 1.
 With Modbus TCP enabled on a GEN24 the coordinator adds SunSpec model 160
 (``sunspec_mppt``): the PV trackers give ``energy_solar_total`` and measured
 per-MPPT power, the battery port gives the battery energy counters.
@@ -29,6 +35,7 @@ per-MPPT power, the battery port gives the battery energy counters.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 from ..contract import indexed_role
@@ -46,8 +53,18 @@ REQUESTS: dict[str, str] = {
     "inverter_info": "GetInverterInfo.cgi",
     "meter": "GetMeterRealtimeData.cgi?Scope=System",
     "storage": "GetStorageRealtimeData.cgi?Scope=System",
+    "archive_strings": "GetArchiveData.cgi?Scope=System&StartDate={day}&EndDate={day}"
+    "&Channel=Voltage_DC_String_1&Channel=Current_DC_String_1"
+    "&Channel=Voltage_DC_String_2&Channel=Current_DC_String_2",
 }
 MAX_MPPT = 4
+ARCHIVE_STRINGS = 2
+# the Datamanager archive has one sample per 5 minutes
+ARCHIVE_INTERVAL_SECONDS = 300
+ARCHIVE_MAX_AGE_SECONDS = 900
+# plausible string values; anything outside is dropped
+MAX_STRING_VOLTAGE = 1500
+MAX_STRING_CURRENT = 100
 METER_LOCATION_GRID = 0.0
 
 
@@ -220,17 +237,22 @@ def build_devices(responses: dict[str, Any]) -> dict[str, FroniusDevice]:
     _set(inverter, "power_inverter_ac_output", _num(common.get("PAC")), 0)
     _set(inverter, "voltage_grid", _num(common.get("UAC")), 1)
     _set(inverter, "frequency_grid", _num(common.get("FAC")), 2)
-    for channel in range(1, MAX_MPPT + 1):
-        suffix = "" if channel == 1 else f"_{channel}"
-        voltage = _num(common.get(f"UDC{suffix}"))
-        current = _num(common.get(f"IDC{suffix}"))
-        if voltage is None or current is None:
-            continue
-        _set(inverter, indexed_role("voltage_solar_mppt", channel), voltage, 1)
-        _set(inverter, indexed_role("current_solar_mppt", channel), current, 2)
-        power_role = indexed_role("power_solar_mppt", channel)
-        _set(inverter, power_role, voltage * current, 0)
-        inverter.derived.add(power_role)
+    if needs_archive(common):
+        _archive_trackers(
+            inverter,
+            responses.get("dc_strings") or {},
+            responses.get("dc_string_channels") or set(),
+            _num(site.get("P_PV")),
+        )
+    else:
+        for channel in range(1, MAX_MPPT + 1):
+            suffix = "" if channel == 1 else f"_{channel}"
+            _tracker(
+                inverter,
+                channel,
+                _num(common.get(f"UDC{suffix}")),
+                _num(common.get(f"IDC{suffix}")),
+            )
     total = _kwh(_num(common.get("TOTAL_ENERGY")))
     if total is None:
         total = _kwh(_num(flow_inverter.get("E_Total")))
@@ -282,6 +304,90 @@ def _apply_sunspec(
     if battery is not None and counters is not None:
         _set(battery, "energy_battery_charge_total", counters[0], 3)
         _set(battery, "energy_battery_discharge_total", counters[1], 3)
+
+
+def _tracker(
+    inverter: FroniusDevice, channel: int, voltage: float | None, current: float | None
+) -> None:
+    if voltage is None or current is None:
+        return
+    _set(inverter, indexed_role("voltage_solar_mppt", channel), voltage, 1)
+    _set(inverter, indexed_role("current_solar_mppt", channel), current, 2)
+    power_role = indexed_role("power_solar_mppt", channel)
+    _set(inverter, power_role, voltage * current, 0)
+    inverter.derived.add(power_role)
+
+
+def _archive_trackers(
+    inverter: FroniusDevice,
+    strings: dict[int, tuple[float, float]],
+    known: set[int],
+    pv_power: float | None,
+) -> None:
+    """Per-string values from the archive; known strings read 0 W at night. @zara"""
+    for channel, (voltage, current) in strings.items():
+        _tracker(inverter, channel, voltage, current)
+    if not pv_power:
+        for channel in known - set(strings):
+            inverter.roles[indexed_role("power_solar_mppt", channel)] = 0
+
+
+def inverter_common(response: Any) -> dict[str, Any]:
+    """Return the ``CommonInverterData`` values of an inverter response. @zara"""
+    return _data(response) or {}
+
+
+def needs_archive(common: dict[str, Any]) -> bool:
+    """Return True for a Datamanager device that reports only one DC input. @zara"""
+    return "UDC" in common and "UDC_2" not in common
+
+
+def archive_strings(
+    response: Any, device_id: str, seconds_of_day: int
+) -> dict[int, tuple[float, float]]:
+    """Latest recent (voltage, current) per string from an archive response. @zara
+
+    Sample keys are seconds since local midnight; samples older than
+    ``ARCHIVE_MAX_AGE_SECONDS`` or from the future are ignored.
+    """
+    node = (_data(response) or {}).get(f"inverter/{device_id}")
+    channels = node.get("Data") if isinstance(node, dict) else None
+    if not isinstance(channels, dict):
+        return {}
+    strings: dict[int, tuple[float, float]] = {}
+    for channel in range(1, ARCHIVE_STRINGS + 1):
+        voltages = _values(
+            channels.get(f"Voltage_DC_String_{channel}"), MAX_STRING_VOLTAGE
+        )
+        currents = _values(
+            channels.get(f"Current_DC_String_{channel}"), MAX_STRING_CURRENT
+        )
+        common_keys = [
+            key
+            for key in voltages.keys() & currents.keys()
+            if 0 <= seconds_of_day - key <= ARCHIVE_MAX_AGE_SECONDS
+        ]
+        if common_keys:
+            latest = max(common_keys)
+            strings[channel] = (voltages[latest], currents[latest])
+    return strings
+
+
+def _values(channel: Any, limit: float) -> dict[int, float]:
+    """Archive samples keyed by seconds of the day, within 0..limit. @zara"""
+    values = channel.get("Values") if isinstance(channel, dict) else None
+    if not isinstance(values, dict):
+        return {}
+    out: dict[int, float] = {}
+    for key, value in values.items():
+        text = str(key)
+        number = _num(value)
+        # ASCII digits only: int() rejects other Unicode digits and huge numbers
+        if not (text.isascii() and text.isdigit() and len(text) <= 6):
+            continue
+        if number is not None and math.isfinite(number) and 0 <= number <= limit:
+            out[int(text)] = number
+    return out
 
 
 def _grid_roles(device: FroniusDevice, grid: float) -> None:

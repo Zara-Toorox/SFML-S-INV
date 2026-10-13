@@ -23,9 +23,13 @@ SolarFlow 4000 Mix Pro devices:
 - ``electricLevel`` average state of charge (%)
 - ``packData[n].socLevel`` (%) and ``packData[n].maxTemp`` (0.1 K, °C = (v - 2731) / 10)
 
-Not yet published as roles until verified on a device: voltages (``BatVolt``,
-``totalVol``: scaling differs between sources), ``hyperTmp`` (unit undocumented)
-and ``gridInputPower`` (AC input; split between battery and house not reported).
+A SolarFlow 800 Pro report (2026-10-13, two packs) fixes further scalings by
+cross-checks: ``BatVolt`` / 100 V (49.49 V against pack ``totalVol`` / 100 of
+49.40 and 49.30 V, 15 cells of 3.29 V), ``hyperTmp`` in the same 0.1 K encoding
+as ``maxTemp`` (33.0 °C) and ``socSet``/``minSoc`` in 0.1 %. They are published
+only within plausible ranges, as other models may scale differently.
+``gridInputPower`` (AC input; split between battery and house not reported) stays
+a vendor value.
 """
 
 from __future__ import annotations
@@ -70,7 +74,19 @@ VENDOR_SPECS: dict[str, VendorSpec] = {
     "wifi_signal": VendorSpec(
         "dBm", "signal_strength", "measurement", "Wi-Fi signal", "WLAN-Signal"
     ),
+    "battery_voltage": VendorSpec(
+        "V", "voltage", "measurement", "Battery voltage", "Akkuspannung"
+    ),
+    "target_soc": VendorSpec(
+        "%", None, "measurement", "Target state of charge", "Ziel-Ladestand"
+    ),
+    "min_soc": VendorSpec(
+        "%", None, "measurement", "Minimum state of charge", "Mindest-Ladestand"
+    ),
 }
+# plausible ranges for values whose scaling is known from one model only
+BATTERY_VOLTAGE_RANGE = (36.0, 60.0)
+DEVICE_TEMPERATURE_RANGE = (-30.0, 90.0)
 
 
 @dataclass
@@ -124,6 +140,19 @@ def _set(
         device.roles[role] = round(value, digits)
 
 
+def _deci_kelvin(value: float | None) -> float | None:
+    """Convert Zendure's 0.1 K temperatures to °C. @zara"""
+    return None if value is None else (value - KELVIN_OFFSET_DECI) / 10
+
+
+def _scaled(value: float | None, divisor: float) -> float | None:
+    return None if value is None else value / divisor
+
+
+def _within(value: float | None, bounds: tuple[float, float]) -> float | None:
+    return value if value is not None and bounds[0] <= value <= bounds[1] else None
+
+
 def build_devices(report: Any) -> dict[str, ZendureDevice]:
     """Parse one zenSDK report into S-INV devices (keyed by serial). @zara"""
     ident = identity(report)
@@ -154,6 +183,18 @@ def build_devices(report: Any) -> dict[str, ZendureDevice]:
         _set(device, "power_battery", charge - discharge, 0)
         device.derived.add("power_battery")
     _set(device, "battery_soc", _num(props.get("electricLevel")), 0)
+    _set(
+        device,
+        "temperature_inverter",
+        _within(_deci_kelvin(_num(props.get("hyperTmp"))), DEVICE_TEMPERATURE_RANGE),
+    )
+    voltage = _within(_scaled(_num(props.get("BatVolt")), 100), BATTERY_VOLTAGE_RANGE)
+    if voltage is not None:
+        device.vendor["battery_voltage"] = round(voltage, 2)
+    for key, source in (("target_soc", "socSet"), ("min_soc", "minSoc")):
+        soc = _within(_scaled(_num(props.get(source)), 10), (0.0, 100.0))
+        if soc is not None:
+            device.vendor[key] = round(soc, 1)
     packs = report.get("packData")
     for index, pack in enumerate(packs if isinstance(packs, list) else [], start=1):
         if not isinstance(pack, dict):
@@ -164,13 +205,11 @@ def build_devices(report: Any) -> dict[str, ZendureDevice]:
             _num(pack.get("socLevel")),
             0,
         )
-        temperature = _num(pack.get("maxTemp"))
-        if temperature is not None:
-            _set(
-                device,
-                indexed_role("temperature_battery_pack", index),
-                (temperature - KELVIN_OFFSET_DECI) / 10,
-            )
+        _set(
+            device,
+            indexed_role("temperature_battery_pack", index),
+            _deci_kelvin(_num(pack.get("maxTemp"))),
+        )
     for key, source in (
         ("grid_input_power", "gridInputPower"),
         ("input_limit", "inputLimit"),

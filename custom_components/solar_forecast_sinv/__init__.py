@@ -377,6 +377,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     active = hass.data.get(DOMAIN) or []
     if len(active) >= len(entries):
         ir.async_delete_issue(hass, DOMAIN, "duplicate_devices")
+    site.async_remove_unused_site_entry(hass, entry)
 
 
 async def async_remove_config_entry_device(

@@ -24,6 +24,7 @@ from homeassistant.const import CONF_HOST, CONF_SCAN_INTERVAL
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import LOGGER
 from .modbus_tcp import READ_HOLDING_REGISTERS, ModbusError, ModbusTcpClient
@@ -95,6 +96,10 @@ class FroniusCoordinator(DataUpdateCoordinator[dict[str, fronius.FroniusDevice]]
         # (wire address, length) of model 160 once found
         self._mppt_model: tuple[int, int] | None = None
         self._modbus_retry_at = 0.0
+        # Datamanager devices: last archive answer, when it was fetched, strings seen
+        self._archive: Any = None
+        self._archive_at = 0.0
+        self._archive_channels: set[int] = set()
 
     async def _async_update_data(self) -> dict[str, fronius.FroniusDevice]:
         try:
@@ -132,11 +137,33 @@ class FroniusCoordinator(DataUpdateCoordinator[dict[str, fronius.FroniusDevice]]
             responses[key] = result
         if "powerflow" not in responses and "inverter" not in responses:
             raise UpdateFailed(f"Fronius at {self.host} returned no realtime data")
+        if fronius.needs_archive(fronius.inverter_common(responses.get("inverter"))):
+            await self._async_add_archive_strings(responses, identity["device_id"])
         if self._modbus and time.monotonic() >= self._modbus_retry_at:
             modules = await self._async_read_mppt_model()
             if modules:
                 responses["sunspec_mppt"] = modules
         return fronius.build_devices(responses)
+
+    async def _async_add_archive_strings(
+        self, responses: dict[str, Any], device_id: str
+    ) -> None:
+        """Add per-string values from the 5-minute archive of a Datamanager. @zara"""
+        now = dt_util.now()
+        if time.monotonic() - self._archive_at >= fronius.ARCHIVE_INTERVAL_SECONDS:
+            self._archive_at = time.monotonic()
+            url = self._api + fronius.REQUESTS["archive_strings"].format(
+                day=now.strftime("%d.%m.%Y")
+            )
+            try:
+                self._archive = await fetch_json(self._session, url)
+            except (ClientError, TimeoutError, ValueError, TypeError) as err:
+                LOGGER.debug("Fronius %s archive request failed: %s", self.host, err)
+        seconds = now.hour * 3600 + now.minute * 60 + now.second
+        strings = fronius.archive_strings(self._archive, device_id, seconds)
+        self._archive_channels.update(strings)
+        responses["dc_strings"] = strings
+        responses["dc_string_channels"] = set(self._archive_channels)
 
     async def _async_read_mppt_model(self) -> list[sunspec.Module]:
         """Read SunSpec model 160 over Modbus TCP; never fails the cycle. @zara"""

@@ -156,6 +156,25 @@ def async_ensure_site_entry(hass: HomeAssistant) -> None:
     )
 
 
+@callback
+def async_remove_unused_site_entry(hass: HomeAssistant, removed: ConfigEntry) -> None:
+    """Remove the installation entry together with the last device instance. @zara
+
+    Called after ``removed`` left ``hass.config_entries``. Disabled device
+    instances still count, so the installation stays while any instance exists.
+    """
+    entries = hass.config_entries.async_entries(DOMAIN, include_ignore=False)
+    if removed.data.get(CONF_VENDOR) != VENDOR_SITE and any(
+        entry.data.get(CONF_VENDOR) != VENDOR_SITE for entry in entries
+    ):
+        return
+    # a later first instance creates the installation entry again
+    hass.data.pop(_FLOW_STARTED, None)
+    for entry in entries:
+        if entry.unique_id == SITE_UNIQUE_ID:
+            hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
+
+
 def site_device_info() -> DeviceInfo:
     """Device of the installation. @zara"""
     return DeviceInfo(
