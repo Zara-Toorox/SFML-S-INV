@@ -20,18 +20,22 @@ the same way from the installation power when no device measures that flow.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
 )
 from homeassistant.config_entries import SOURCE_SYSTEM, ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -43,16 +47,23 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from . import contract, site_daily, site_flows
-from .const import CONF_VENDOR, DOMAIN, VENDOR_HP, is_hp_device_vendor
+from .const import CONF_VENDOR, DOMAIN, LOGGER, VENDOR_HP, is_hp_device_vendor
 from .entity import async_convert_draft_system_entries, async_reclaim_system_ids
+from .vendors.anker import GRID_ENERGY_ROLES, grid_energy_priority
 
 VENDOR_SITE = "site"
 SITE_UNIQUE_ID = "sinv_site"
 SITE_TITLE = "S-INV Anlage"
 SOURCES_ATTR = "sinv_sources"
+SOURCE_ATTR = "sinv_source"
+OFFSET_ATTR = "sinv_source_offset"
 AGGREGATION_ATTR = "sinv_aggregation"
 _FLOW_STARTED = f"{DOMAIN}_site_flow_started"
 _SITE_DAILY = f"{DOMAIN}.site_daily"
+_SITE_SOURCES = f"{DOMAIN}.site_sources"
+# Longer than a restart and a few missed Solarbank messages, shorter than
+# leaving the counter empty while the smart meter still has a reading.
+SOURCE_HOLD = timedelta(minutes=15)
 _INDEX = re.compile(r"^sinv_[a-z]{2}(\d\d)_")
 
 
@@ -64,6 +75,161 @@ class Source:
     serial: str
     index: int
     entry_id: str = ""
+    priority: int = 0
+
+
+@dataclass(frozen=True)
+class SourceCont:
+    """Offset that keeps one installation counter continuous across sources. @zara"""
+
+    entity_id: str
+    offset: float
+    published: float | None
+    missing_since: str | None = None
+    live: bool = True
+
+
+def source_now() -> datetime:
+    """Clock for the source-hold window. @zara"""
+    return dt_util.utcnow()
+
+
+def _rank_sources(sources: list[Source]) -> list[Source]:
+    return sorted(
+        sources, key=lambda source: (-source.priority, source.index, source.entity_id)
+    )
+
+
+def valid_energy_seed(value: Any, unit: Any, expected_unit: str) -> float | None:
+    """Return a last installation total that may seed an offset, or None. @zara
+
+    The value has to be a finite number of at least 0 and the unit has to be
+    the contract unit. Anything else is ignored so the first offset stays 0.
+    """
+    if not isinstance(unit, str) or unit != expected_unit:
+        return None
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower() in {"", "none", "unknown", "unavailable"}:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def continue_single(
+    readings: list[tuple[Source, float | None]],
+    memory: SourceCont | None,
+    now: datetime,
+    seed: float | None,
+) -> tuple[float | None, SourceCont | None, str | None]:
+    """Publish one lifetime counter without a jump when its source changes. @zara
+
+    The preferred source (highest priority, then device index) is used as soon
+    as it has a value. A lower source is adopted only after the current source
+    has been missing for ``SOURCE_HOLD``. On the first live reading the offset
+    is the restored installation total minus the source when the source is
+    lower, and 0 when the source is greater or equal. A later source change
+    keeps the last published value. The same source never publishes below that
+    value. Returns the published value, the new memory, and the previous
+    entity id when the source changed.
+    """
+    if now.tzinfo is None:
+        raise ValueError("source hold requires a timezone-aware datetime")
+    ranked = _rank_sources([source for source, _value in readings])
+    raw_of = {source.entity_id: value for source, value in readings}
+    if not ranked:
+        return None, memory, None
+    preferred = ranked[0]
+    preferred_raw = raw_of.get(preferred.entity_id)
+
+    established = bool(memory and memory.live and memory.published is not None)
+
+    def adopt(
+        source: Source, raw: float, base: float | None
+    ) -> tuple[float, SourceCont, str | None]:
+        previous = memory.entity_id if memory and memory.live else None
+        if previous == source.entity_id and memory is not None:
+            offset = memory.offset
+            switched = None
+        elif base is None or (not established and raw >= base):
+            # First commissioning, or the restored total is already at or
+            # below the source: do not invent a positive offset.
+            offset = 0.0
+            switched = None
+        else:
+            offset = base - raw
+            switched = previous or ""
+        published = round(raw + offset, 3)
+        if established and memory is not None and published < memory.published:
+            # Home Assistant resets a total_increasing statistic only when the
+            # state falls below 90% of the previous state. Keeping the last
+            # published value avoids that reset and the smaller dip warning.
+            published = memory.published
+        return (
+            published,
+            SourceCont(source.entity_id, offset, published, None, True),
+            switched,
+        )
+
+    if preferred_raw is not None:
+        base = memory.published if memory and memory.published is not None else seed
+        published, updated, switched = adopt(preferred, preferred_raw, base)
+        return published, updated, switched
+
+    current = preferred
+    if memory and memory.entity_id in raw_of:
+        current = next(
+            source for source in ranked if source.entity_id == memory.entity_id
+        )
+    current_raw = raw_of.get(current.entity_id)
+    if current_raw is not None and current is not preferred:
+        base = memory.published if memory and memory.published is not None else seed
+        published, updated, switched = adopt(current, current_raw, base)
+        since = memory.missing_since if memory else None
+        updated = SourceCont(
+            updated.entity_id, updated.offset, updated.published, since, True
+        )
+        return published, updated, switched
+
+    since_text = memory.missing_since if memory and memory.missing_since else None
+    if since_text is None:
+        since = now
+        since_text = now.isoformat()
+    else:
+        since = datetime.fromisoformat(since_text)
+        if since.tzinfo is None:
+            since = now
+    held = SourceCont(
+        current.entity_id,
+        memory.offset if memory else 0.0,
+        memory.published if memory else seed,
+        since_text,
+        memory.live if memory else False,
+    )
+    if now - since < SOURCE_HOLD:
+        return None, held, None
+    base = held.published
+    for source in ranked:
+        if source.entity_id == current.entity_id:
+            continue
+        raw = raw_of.get(source.entity_id)
+        if raw is None:
+            continue
+        published, updated, switched = adopt(source, raw, base)
+        return published, updated, switched
+    return None, held, None
 
 
 def aggregate(
@@ -198,6 +364,107 @@ class SiteDaily:
             self._store.async_delay_save(self.tracker.snapshot, 1.0)
 
 
+class SourceTracker:
+    """Persisted source and offset of every continued installation counter. @zara"""
+
+    def __init__(self) -> None:
+        """Start with no stored source. @zara"""
+        self._roles: dict[str, SourceCont] = {}
+
+    def get(self, role: str) -> SourceCont | None:
+        """Return the stored continuation of one role. @zara"""
+        return self._roles.get(role)
+
+    def set(self, role: str, cont: SourceCont) -> None:
+        """Remember the continuation of one role. @zara"""
+        self._roles[role] = cont
+
+    def snapshot(self) -> dict[str, Any]:
+        """JSON-ready source offsets. @zara"""
+        return {
+            "roles": {
+                role: {
+                    "entity_id": cont.entity_id,
+                    "offset": cont.offset,
+                    "published": cont.published,
+                    "missing_since": cont.missing_since,
+                    "live": cont.live,
+                }
+                for role, cont in self._roles.items()
+            }
+        }
+
+    @classmethod
+    def from_snapshot(cls, raw: Any) -> SourceTracker:
+        """Restore a snapshot written by ``snapshot``. @zara"""
+        tracker = cls()
+        if not isinstance(raw, dict):
+            return tracker
+        roles = raw.get("roles")
+        if not isinstance(roles, dict):
+            return tracker
+        for role, item in roles.items():
+            parsed = _parse_source(role, item)
+            if parsed is not None:
+                tracker._roles[role] = parsed
+        return tracker
+
+
+def _parse_source(role: Any, item: Any) -> SourceCont | None:
+    if not isinstance(role, str) or not contract.continues_total(role):
+        return None
+    if not isinstance(item, dict):
+        return None
+    entity_id = item.get("entity_id")
+    offset = item.get("offset")
+    if not isinstance(entity_id, str) or isinstance(offset, bool):
+        return None
+    try:
+        offset_value = float(offset)
+    except (TypeError, ValueError):
+        return None
+    published = item.get("published")
+    if published is not None:
+        try:
+            published = float(published)
+        except (TypeError, ValueError):
+            return None
+    missing = item.get("missing_since")
+    if missing is not None and not isinstance(missing, str):
+        return None
+    live = item.get("live", True)
+    if not isinstance(live, bool):
+        live = True
+    return SourceCont(entity_id, offset_value, published, missing, live)
+
+
+class SiteSources:
+    """Persisted source offsets of one installation. @zara"""
+
+    def __init__(self, tracker: SourceTracker, store: Store | None = None) -> None:
+        """Keep the tracker and the store that reloads it after a restart. @zara"""
+        self.tracker = tracker
+        self._store = store
+        # Runtime only. A stored continuation is never replaced from here.
+        self.seeds: dict[str, float | None] = {}
+
+    def save(self) -> None:
+        """Persist the tracker when a store is attached. @zara"""
+        if self._store is not None:
+            self._store.async_delay_save(self.tracker.snapshot, 1.0)
+
+
+async def ensure_site_sources(hass: HomeAssistant) -> SiteSources:
+    """Load the installation source-offset store once. @zara"""
+    holder = hass.data.get(_SITE_SOURCES)
+    if isinstance(holder, SiteSources):
+        return holder
+    store: Store = Store(hass, 1, _SITE_SOURCES)
+    holder = SiteSources(SourceTracker.from_snapshot(await store.async_load()), store)
+    hass.data[_SITE_SOURCES] = holder
+    return holder
+
+
 async def ensure_site_daily(hass: HomeAssistant) -> SiteDaily:
     """Load the installation baseline store once. @zara"""
     holder = hass.data.get(_SITE_DAILY)
@@ -211,7 +478,18 @@ async def ensure_site_daily(hass: HomeAssistant) -> SiteDaily:
     return holder
 
 
-def collect_sources(entities) -> dict[str, list[Source]]:
+def _device_facts(hass: HomeAssistant, entry):
+    """Return the part number and registry identifiers of the entity's device. @zara"""
+    device_id = getattr(entry, "device_id", None)
+    if not device_id:
+        return None
+    device = dr.async_get(hass).async_get(device_id)
+    if device is None:
+        return None
+    return device.model_id, device.identifiers
+
+
+def collect_sources(entities, device_of=None) -> dict[str, list[Source]]:
     """Device entities per role with a system entity, ordered by device index. @zara"""
     sources: dict[str, list[Source]] = {}
     for entry in entities:
@@ -232,16 +510,33 @@ def collect_sources(entities) -> dict[str, list[Source]]:
             continue
         match = _INDEX.match(entry.entity_id.split(".", 1)[1])
         index = int(match.group(1)) if match else 99
+        model_id, identifiers = (None, None)
+        if device_of is not None:
+            facts = device_of(entry)
+            if facts:
+                model_id, identifiers = facts
+        priority = (
+            grid_energy_priority(model_id=model_id, identifiers=identifiers)
+            if role in GRID_ENERGY_ROLES
+            else 0
+        )
         sources.setdefault(role, []).append(
             Source(
                 entry.entity_id,
                 parsed["serial"],
                 index,
                 getattr(entry, "config_entry_id", None) or "",
+                priority,
             )
         )
-    for items in sources.values():
-        items.sort(key=lambda source: (source.index, source.entity_id))
+    for role, items in sources.items():
+        items.sort(
+            key=lambda source, role=role: (
+                -source.priority if contract.continues_total(role) else 0,
+                source.index,
+                source.entity_id,
+            )
+        )
     if (
         "power_grid" not in sources
         and "power_grid_import" in sources
@@ -335,6 +630,7 @@ async def async_setup_site_entities(
     """Create system entities for roles with device sources, now and when new ones appear. @zara"""
     if domain == "sensor":
         await ensure_site_daily(hass)
+        await ensure_site_sources(hass)
     async_convert_draft_system_entries(hass)
     async_reclaim_system_ids(hass)
     registry = er.async_get(hass)
@@ -342,7 +638,9 @@ async def async_setup_site_entities(
 
     @callback
     def refresh(_event: Event | None = None) -> None:
-        sources = collect_sources(registry.entities.values())
+        sources = collect_sources(
+            registry.entities.values(), lambda entry: _device_facts(hass, entry)
+        )
         existing: set[str] = set()
         # system entries converted from first-draft ids still belong to the device
         # entry until this entry adopts them, so the whole registry is scanned
@@ -441,7 +739,10 @@ class _SiteEntity:
     @callback
     def _resubscribe(self) -> None:
         registry = er.async_get(self.hass)
-        all_sources = collect_sources(registry.entities.values())
+        all_sources = collect_sources(
+            registry.entities.values(),
+            lambda entry: _device_facts(self.hass, entry),
+        )
         self._all_sources = all_sources
         self._sources = all_sources.get(self.role, [])
         self._capacity = {
@@ -578,12 +879,14 @@ class _SiteEntity:
         raise NotImplementedError
 
 
-class SiteSensor(_SiteEntity, SensorEntity):
+class SiteSensor(_SiteEntity, RestoreSensor, SensorEntity):
     """Numeric system value of the installation. @zara"""
 
     def __init__(self, role: str) -> None:
         """Set unit and classes from the contract. @zara"""
         super().__init__(role)
+        self._source_seed: float | None = None
+        self._source_cont: SourceCont | None = None
         spec, _channel = contract.split_role(role)
         self._attr_native_unit_of_measurement = spec.unit
         self._attr_device_class = (
@@ -593,7 +896,80 @@ class SiteSensor(_SiteEntity, SensorEntity):
             SensorStateClass(spec.state_class) if spec.state_class else None
         )
 
+    async def async_added_to_hass(self) -> None:
+        """Restore the last total before the first reading can store offset 0. @zara"""
+        if contract.continues_total(self.role):
+            await RestoreSensor.async_added_to_hass(self)
+            holder = self._site_sources()
+            if holder.tracker.get(self.role) is None and self.role not in holder.seeds:
+                holder.seeds[self.role] = await self._restore_seed()
+            self._source_seed = holder.seeds.get(self.role)
+        await super().async_added_to_hass()
+
+    async def _restore_seed(self) -> float | None:
+        """Return the last published total of this entity, or None. @zara"""
+        expected = self._attr_native_unit_of_measurement
+        if not isinstance(expected, str):
+            return None
+        restored = await self.async_get_last_sensor_data()
+        if restored is not None:
+            return valid_energy_seed(
+                restored.native_value,
+                restored.native_unit_of_measurement,
+                expected,
+            )
+        last = await self.async_get_last_state()
+        if last is None:
+            return None
+        attributes = getattr(last, "attributes", None)
+        unit = (
+            attributes.get("unit_of_measurement")
+            if isinstance(attributes, dict)
+            else None
+        )
+        return valid_energy_seed(getattr(last, "state", None), unit, expected)
+
+    def _resolve_seed(self, role: str) -> float | None:
+        """Return the restored total for a role without a live continuation. @zara"""
+        holder = self._site_sources()
+        if role in holder.seeds:
+            return holder.seeds[role]
+        if self.role == role and self._source_seed is not None:
+            return self._source_seed
+        return self._seed_from_state(role)
+
+    def _seed_from_state(self, role: str) -> float | None:
+        """Return the last state still held for this installation entity. @zara"""
+        split = contract.split_role(role)
+        if split is None:
+            return None
+        state = self.hass.states.get(self._installation_entity_id(role))
+        if state is None:
+            return None
+        attributes = getattr(state, "attributes", None)
+        unit = (
+            attributes.get("unit_of_measurement")
+            if isinstance(attributes, dict)
+            else None
+        )
+        return valid_energy_seed(getattr(state, "state", None), unit, split[0].unit)
+
+    def _installation_entity_id(self, role: str) -> str:
+        fallback = f"sensor.{contract.system_object_id(role)}"
+        try:
+            registry = er.async_get(self.hass)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return fallback
+        return (
+            registry.async_get_entity_id(
+                "sensor", DOMAIN, contract.system_unique_id(role)
+            )
+            or fallback
+        )
+
     def _current(self) -> float | None:
+        if self._sources and contract.continues_total(self.role):
+            return self._continued(self.role, self._sources)
         if not self._sources:
             if self._is_derived():
                 return self._derived_current()
@@ -647,11 +1023,80 @@ class SiteSensor(_SiteEntity, SensorEntity):
         sources = self._all_sources.get(role, [])
         if not sources:
             return None
+        if contract.continues_total(role):
+            return self._continued(role, sources)
         values = [_float(self.hass.states.get(source.entity_id)) for source in sources]
         value = aggregate(contract.aggregation(role), values)
         if value is None:
             return None
         return round(float(value), 3)
+
+    def _site_sources(self) -> SiteSources:
+        data = getattr(self.hass, "data", None)
+        if not isinstance(data, dict):
+            data = {}
+            self.hass.data = data
+        holder = data.get(_SITE_SOURCES)
+        if isinstance(holder, SiteSources):
+            return holder
+        holder = SiteSources(SourceTracker())
+        data[_SITE_SOURCES] = holder
+        return holder
+
+    def _continued(self, role: str, sources: list[Source]) -> float | None:
+        """Value of a lifetime counter after its stored source offset. @zara"""
+        holder = self._site_sources()
+        memory = holder.tracker.get(role)
+        fresh = memory is None
+        seeded = not (memory and memory.live and memory.published is not None)
+        seed = self._resolve_seed(role) if seeded else None
+        readings = [
+            (source, _float(self.hass.states.get(source.entity_id)))
+            for source in sources
+        ]
+        published, updated, switched = continue_single(
+            readings, memory, source_now(), seed
+        )
+        # A derived reader must not lock a live offset of 0 before this
+        # entity restores. A hold placeholder still has to be stored, or the
+        # fallback timer would start over on every read.
+        locks_unseeded = (
+            fresh
+            and self.role != role
+            and seed is None
+            and updated is not None
+            and updated.live
+            and updated.offset == 0.0
+        )
+        if updated is not None and updated != memory and not locks_unseeded:
+            holder.tracker.set(role, updated)
+            holder.save()
+        if (
+            updated is not None
+            and switched is not None
+            and not (switched == "" and abs(updated.offset) < 0.0005)
+        ):
+            LOGGER.info(
+                "Installation %s source changed from %s to %s, offset %s kWh",
+                role,
+                switched or "previous value",
+                updated.entity_id,
+                updated.offset,
+            )
+        if self.role == role:
+            self._source_cont = updated
+        return published
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Contract attributes, and the continued source when this counter has one. @zara"""
+        if contract.continues_total(self.role) and self._sources:
+            self._continued(self.role, self._sources)
+        attributes = dict(super().extra_state_attributes)
+        if contract.continues_total(self.role) and self._source_cont is not None:
+            attributes[SOURCE_ATTR] = self._source_cont.entity_id
+            attributes[OFFSET_ATTR] = self._source_cont.offset
+        return attributes
 
     def _today_from_total(self, total_role: str) -> float | None:
         return self._site_daily().update(

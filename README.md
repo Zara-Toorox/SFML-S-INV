@@ -122,7 +122,7 @@ S-INV contains the full Anker Solix support of the upstream integration:
 - Solarbank: A17C0, A17C1, A17C2, A17C3, A17C5
 - Power Dock AE100
 - Inverters MI60 (A5140) and MI80 (A5143)
-- Smart meters A17X7, A17X7US, AE1X0, AE1R0, Shelly 3EM and 3EM Pro
+- Smart meters A17X7, A17X7US, AE1X0, AE1R0, Shelly 3EM and 3EM Pro. The installation grid-energy totals follow the Solarbank counters and use a smart meter only after those Solarbank counters have been missing for 15 minutes, without a jump when the source changes.
 - Smart plug A17X8
 - Portable power stations (PPS), including Solarbank PPS A1782
 - Power panel A17B1

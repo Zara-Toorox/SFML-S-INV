@@ -27,7 +27,7 @@ S-INV publishes two levels:
 | unique_id (device role) | `sinv:1:<device_serial_lower>:<role>` | `sinv:1:apcdjqd0g19200073:power_solar_mppt_01` |
 | unique_id (vendor) | `sinv:1:<device_serial_lower>:<vendor>:<key>` | `sinv:1:apcdjqd0g19200073:anker:wifi_signal` |
 | State attributes (device roles) | `sinv_contract`, `sinv_role`, `sinv_device_index`, `sinv_vendor` | `sinv_role: power_solar_mppt_01` |
-| State attributes (system) | `sinv_contract`, `sinv_role`, `sinv_aggregation`, `sinv_sources`; `sinv_derived: true` when the value is calculated | `sinv_sources: [sensor.sinv_iv01_power_solar]` |
+| State attributes (system) | `sinv_contract`, `sinv_role`, `sinv_aggregation`, `sinv_sources`; `sinv_derived: true` when the value is calculated; continued lifetime totals also carry `sinv_source` and `sinv_source_offset` | `sinv_sources: [sensor.sinv_iv01_power_solar]` |
 
 The device index is assigned per class in order of first discovery and never changes afterwards. One device can carry
 several classes (a Solarbank is `iv01` and `bt01`).
@@ -38,7 +38,7 @@ several classes (a Solarbank is `iv01` and `bt01`).
 |---|---|---|
 | sum | power and energy roles of PV, inverter output, battery; `capacity_battery` | sum of all devices |
 | capacity_weighted | `battery_soc` | mean weighted by `capacity_battery`, plain mean without capacities |
-| single | grid roles, house balance, energy flows | value of the first device (one grid point per installation) |
+| single | grid roles, house balance, energy flows | value of the first device (one grid point per installation). Lifetime energy counters keep that value across a source change; see below |
 | any | `state_curtailment` | on while one device curtails |
 | all | `state_grid_export_allowed` | on only while every device allows export |
 | house_plus_foreign_ac | `power_house` with generators outside the meter owner's system | house value of the one device that reports it, plus `power_ac_net` of every generator in another S-INV entry (see below) |
@@ -47,6 +47,32 @@ several classes (a Solarbank is `iv01` and `bt01`).
 
 A system value is unavailable while one of its device values is missing, so totals never drop. Without a signed grid
 value, `power_grid` of the installation is `power_grid_import − power_grid_export` of the grid meter.
+
+`energy_grid_import_total`, `energy_grid_export_total` and `energy_house_total` are the exception to "the first
+device". They are lifetime counters (`total_increasing`). The installation keeps using one source and, when that
+source changes, stores an offset equal to the last published value minus the new source value. The published value
+is the new source value plus that offset, so the counter does not jump and does not start again at the other
+device's smaller total. The source, the offset and the last published value are stored with the installation and
+survive a restart. The first start without a stored continuation takes the last state of this
+installation entity as the last published value when that state is a finite number, at least 0, and its
+unit is kWh. The offset is that state minus the current source value when the source is lower, and 0 when
+the source is greater or equal: the counter does not drop on update, and a higher source does not get an
+extra offset on top. A missing or invalid last state uses offset 0. A continuation that is already stored
+is not seeded again. The published value never falls below the stored last published value. Home Assistant
+treats a `total_increasing` drop to less than 90% of the previous state as a counter reset
+(`reset_detected` in `homeassistant/components/sensor/recorder.py`); a smaller dip is only a warning.
+This counter publishes neither. A lower reading of the same source stays at the last published value, and
+the next higher reading continues from there. With no source value the counter is unavailable.
+
+Anker grid energy prefers a Solarbank over a smart meter. A Solarbank is recognized by the device type
+`solarbank`, which S-INV stores as an extra device identifier when it creates the device, or, if that identifier
+is not there yet, by the part number (`model_id`) of the Solarbank family (A17C, A17E2, AE103, AE111). The
+display name is not used. The Solarbank publishes the counters continuously; the
+smart meter publishes them only after a realtime trigger. The meter is adopted only after the Solarbank value has
+been missing for 15 minutes. A meter reading that appears while the Solarbank is reporting does not take over.
+Power roles stay on the first device and are not reordered. Derived day counters and the derived house day read
+these continued totals, so a source change does not dent the day. Each source change is logged once. The sensor
+keeps `sinv_sources` and adds `sinv_source` (the entity in use) and `sinv_source_offset`.
 
 House balance and energy flows (`power_house`, `energy_house_*`, `power_*_to_*`) are meaningful for the installation
 only: the providing device keeps a hidden device entity as source, the visible entity is the system entity.

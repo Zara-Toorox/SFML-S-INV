@@ -173,7 +173,7 @@ def get_AnkerSolixSubdeviceInfo(data: dict, identifier: str) -> DeviceInfo:
     """Return an Anker Solix Sub Device DeviceInfo. @thomas"""
 
     return DeviceInfo(
-        identifiers={(DOMAIN, identifier)},
+        identifiers=anker.device_identifiers(identifier, data.get("type")),
         manufacturer=MANUFACTURER,
         serial_number=data.get("device_sn"),
         model=data.get("name") or data.get("device_pn"),
@@ -188,7 +188,7 @@ def get_AnkerSolixDeviceInfo(data: dict, identifier: str) -> DeviceInfo:
     """Return an Anker Solix End Device DeviceInfo. @thomas"""
 
     return DeviceInfo(
-        identifiers={(DOMAIN, identifier)},
+        identifiers=anker.device_identifiers(identifier, data.get("type")),
         manufacturer=MANUFACTURER,
         serial_number=data.get("device_sn"),
         model=data.get("name") or data.get("device_pn"),

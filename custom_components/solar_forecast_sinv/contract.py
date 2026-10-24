@@ -632,6 +632,20 @@ def aggregation(role: str) -> str:
     return _ROLE_RULES[_base(role)][1]
 
 
+def continues_total(role: str) -> bool:
+    """Return whether a single lifetime energy counter must not jump on a source change. @zara"""
+    split = split_role(role)
+    if split is None:
+        return False
+    spec = split[0]
+    return (
+        aggregation(role) == AGG_SINGLE
+        and spec.device_class == "energy"
+        and spec.state_class == "total_increasing"
+        and spec.base.endswith("_total")
+    )
+
+
 # site rule of power_house when generators outside the meter owner's system are added
 AGG_HOUSE_BALANCE = "house_plus_foreign_ac"
 # vendors whose power_house is grid + their own net AC (an energy balance), so that

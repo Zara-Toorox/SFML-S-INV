@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 
+from ..const import DOMAIN
 from ..contract import indexed_role
 
 VENDOR = "anker"
@@ -109,6 +110,61 @@ _MAIN_PACK: dict[str, str] = {
 
 # roles an Anker key published before it became a vendor value: role -> key
 RETIRED_ROLES = {"power_grid": "grid_power_signed"}
+
+# Grid energy of the installation. The Solarbank publishes these counters
+# continuously. The smart meter publishes them only after a realtime trigger,
+# so it stays the fallback. Power roles are not reordered.
+GRID_ENERGY_ROLES = frozenset({"energy_grid_import_total", "energy_grid_export_total"})
+_SOLARBANK_GRID_PRIORITY = 10
+SOLARBANK_TYPE = "solarbank"
+_SOLARBANK_ID_SUFFIX = ":solarbank"
+# Part-number prefixes whose SolixDeviceCategory value is solarbank
+# (apitypes.py, SolixDeviceCategory, the Solarbank block). AE100 is a
+# combiner box there, and A17X7 is a smart meter, so neither prefix is used.
+_SOLARBANK_PN_PREFIXES = ("A17C", "A17E2", "AE103", "AE111")
+
+
+def device_identifiers(serial: str, device_type: str | None) -> set[tuple[str, str]]:
+    """Return registry identifiers for one Anker device. A Solarbank keeps an extra id. @zara"""
+    ident = str(serial)
+    identifiers = {(DOMAIN, ident)}
+    if device_type == SOLARBANK_TYPE:
+        identifiers.add((DOMAIN, f"{ident}{_SOLARBANK_ID_SUFFIX}"))
+    return identifiers
+
+
+def _marked_solarbank(identifiers) -> bool:
+    if not identifiers:
+        return False
+    for item in identifiers:
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        domain, value = item
+        if (
+            domain == DOMAIN
+            and isinstance(value, str)
+            and value.endswith(_SOLARBANK_ID_SUFFIX)
+        ):
+            return True
+    return False
+
+
+def _pn_solarbank(model_id: str | None) -> bool:
+    if not isinstance(model_id, str):
+        return False
+    return model_id.strip().upper().startswith(_SOLARBANK_PN_PREFIXES)
+
+
+def grid_energy_priority(*, model_id: str | None = None, identifiers=None) -> int:
+    """Higher value wins for an installation grid-energy counter. @zara
+
+    The display name is ignored. A Solarbank is the device whose Anker type
+    was stored as an extra registry identifier, or, for a device registered
+    before that, whose part number is one of the Solarbank family.
+    """
+    if _marked_solarbank(identifiers) or _pn_solarbank(model_id):
+        return _SOLARBANK_GRID_PRIORITY
+    return 0
 
 
 def role_for_key(key: str, device_type: str | None = None) -> str | None:
