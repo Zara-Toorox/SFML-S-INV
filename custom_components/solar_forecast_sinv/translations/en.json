@@ -596,7 +596,7 @@
                     "install_count": "Take part in the BETA test (anonymous install count)"
                 },
                 "data_description": {
-                    "install_count": "On by default during the BETA, can be switched off at any time. When on, only the installed version number (e.g. “S-INV 3.0.2”) is sent to solarforecastml.com once a day – no device- or user-specific data, no identifier, no measured values. Only how often each version was reported per day is stored. Your IP address is technically visible in transit and kept as an encrypted hash for abuse protection for at most two days. Details: https://www.solarforecastml.com/en/privacy"
+                    "install_count": "On by default during the BETA, can be switched off at any time. When on, only the installed version number (e.g. “S-INV 3.0.3”) is sent to solarforecastml.com once a day – no device- or user-specific data, no identifier, no measured values. Only how often each version was reported per day is stored. Your IP address is technically visible in transit and kept as an encrypted hash for abuse protection for at most two days. Details: https://www.solarforecastml.com/en/privacy"
                 },
                 "description": "Energy dashboard: add the sensors of this device yourself under Settings → Dashboards → Energy – grid consumption `sensor.sinv_energy_grid_import_total`, return to grid `sensor.sinv_energy_grid_export_total`, solar production `sensor.sinv_energy_solar_total`, battery in `sensor.sinv_energy_battery_charge_total`, battery out `sensor.sinv_energy_battery_discharge_total`. Use only these installation sensors, otherwise energy is counted twice."
             }

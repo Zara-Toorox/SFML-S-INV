@@ -100,7 +100,7 @@ The same device publishes daily counters that reset at local midnight. Use them 
 
 House energy total is `sensor.sinv_energy_house_total`: the measured counter when a system reports one, otherwise calculated from the installation totals. A daily counter is the measured device value when that exists, otherwise the rise of the matching total since local midnight.
 
-Instantaneous power flows are `sensor.sinv_power_solar_to_house`, `sensor.sinv_power_solar_to_battery`, `sensor.sinv_power_grid_to_battery`, `sensor.sinv_power_battery_to_house` and `sensor.sinv_power_grid_to_house`. A measured device flow is kept. Otherwise S-INV derives the missing flow from the installation power (PV to the house first, then the battery, then the grid). These are watts for automations and other integrations, not energy-dashboard counters. The three battery flows exist only when the installation has a battery.
+Instantaneous power flows are `sensor.sinv_power_solar_to_house`, `sensor.sinv_power_solar_to_battery`, `sensor.sinv_power_grid_to_battery`, `sensor.sinv_power_battery_to_house` and `sensor.sinv_power_grid_to_house`. A measured device flow is kept. Otherwise S-INV derives the missing flow from the installation power. While the battery charges, PV goes to the battery first and the rest to the house; otherwise PV goes to the house first. The grid covers what remains. These are watts for automations and other integrations, not energy-dashboard counters. The three battery flows exist only when the installation has a battery. Solakon battery power stays unpublished until the charge and discharge counters have shown the sign of register 39230 twice for that device.
 
 ## Early BETA notes
 
