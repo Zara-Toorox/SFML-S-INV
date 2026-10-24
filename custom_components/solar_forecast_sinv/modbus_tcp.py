@@ -24,6 +24,7 @@ READ_HOLDING_REGISTERS = 0x03
 READ_INPUT_REGISTERS = 0x04
 READ_FUNCTIONS = (READ_HOLDING_REGISTERS, READ_INPUT_REGISTERS)
 MAX_REGISTERS_PER_READ = 125
+CLOSE_TIMEOUT = 5.0
 
 
 class ModbusError(Exception):
@@ -57,20 +58,33 @@ class ModbusTcpClient:
         self._writer: asyncio.StreamWriter | None = None
         self._transaction = 0
 
-    async def __aenter__(self) -> ModbusTcpClient:
+    @property
+    def connected(self) -> bool:
+        """Return True while the TCP connection is open. @zara"""
+        return self._writer is not None and not self._writer.is_closing()
+
+    async def connect(self) -> None:
         """Open the connection. @zara"""
         self._reader, self._writer = await asyncio.wait_for(
             asyncio.open_connection(self.host, self.port), self.timeout
         )
+
+    async def close(self) -> None:
+        """Close the connection. @zara"""
+        if self._writer is not None:
+            self._writer.close()
+            with contextlib.suppress(OSError, TimeoutError):
+                await asyncio.wait_for(self._writer.wait_closed(), CLOSE_TIMEOUT)
+        self._reader = self._writer = None
+
+    async def __aenter__(self) -> ModbusTcpClient:
+        """Open the connection. @zara"""
+        await self.connect()
         return self
 
     async def __aexit__(self, *args) -> None:
         """Close the connection. @zara"""
-        if self._writer is not None:
-            self._writer.close()
-            with contextlib.suppress(OSError):
-                await self._writer.wait_closed()
-        self._reader = self._writer = None
+        await self.close()
 
     async def read(
         self, address: int, count: int, function: int = READ_HOLDING_REGISTERS
@@ -98,20 +112,26 @@ class ModbusTcpClient:
             address,
             count,
         )
-        self._writer.write(request)
-        await self._writer.drain()
-        header = await asyncio.wait_for(self._reader.readexactly(7), self.timeout)
-        transaction, protocol, length, unit = struct.unpack(">HHHB", header)
-        if (
-            transaction != self._transaction
-            or protocol != 0
-            or unit != self.unit_id
-            or not 2 <= length <= 254
-        ):
-            raise ModbusError("unexpected Modbus TCP header")
-        body = await asyncio.wait_for(
-            self._reader.readexactly(length - 1), self.timeout
-        )
+        try:
+            self._writer.write(request)
+            await self._writer.drain()
+            header = await asyncio.wait_for(self._reader.readexactly(7), self.timeout)
+            transaction, protocol, length, unit = struct.unpack(">HHHB", header)
+            if (
+                transaction != self._transaction
+                or protocol != 0
+                or unit != self.unit_id
+                or not 2 <= length <= 254
+            ):
+                raise ModbusError("unexpected Modbus TCP header")
+            body = await asyncio.wait_for(
+                self._reader.readexactly(length - 1), self.timeout
+            )
+        except (ModbusError, OSError, TimeoutError, EOFError):
+            # a late, foreign or half-read frame leaves the stream out of step:
+            # the connection is never reused after it
+            await self.close()
+            raise
         # exception answers count too, so the next request still keeps the gap
         self._last_request = asyncio.get_running_loop().time()
         if body[0] == function | 0x80:

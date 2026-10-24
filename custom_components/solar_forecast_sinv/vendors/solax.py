@@ -219,7 +219,7 @@ def build_devices(
         _set(device, "energy_grid_import_total", _scaled(u32(inputs, 0x004A), 100), 2)
         if on_grid is not None:
             house = on_grid - feed_in + max(0, off_grid or 0)
-            _set(device, "power_house", max(0, house), 0)
+            _set(device, "power_house", house, 0)
             device.derived.add("power_house")
 
     if u16(inputs, 0x0017) == 1:  # BMS1 connected

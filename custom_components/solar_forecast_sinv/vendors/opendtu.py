@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..contract import indexed_role
+from ..contract import ac_net_without_battery, indexed_role
 
 VENDOR = "hoymiles"
 NAME = "Hoymiles"
@@ -200,4 +200,6 @@ def build_device(detail: Any) -> HoymilesDevice | None:
     efficiency = _value(inv, "Efficiency")
     if efficiency is not None and reachable:
         device.vendor["efficiency"] = round(efficiency, 1)
+    if (net := ac_net_without_battery(device.roles)) is not None:
+        device.roles["power_ac_net"] = net
     return device

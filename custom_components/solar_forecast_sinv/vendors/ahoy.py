@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 import math
 from typing import Any
 
-from ..contract import indexed_role
+from ..contract import ac_net_without_battery, indexed_role
 
 VENDOR = "hoymiles"
 NAME = "Hoymiles"
@@ -204,4 +204,6 @@ def build_device(detail: Any) -> HoymilesDevice | None:
     limit = _num(detail.get("power_limit_read"))
     if limit is not None and 0 <= limit <= 100:
         device.vendor["power_limit_relative"] = round(limit, 1)
+    if (net := ac_net_without_battery(device.roles)) is not None:
+        device.roles["power_ac_net"] = net
     return device

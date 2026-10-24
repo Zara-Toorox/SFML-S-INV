@@ -17,6 +17,7 @@ S-INV is a Home Assistant integration (domain `solar_forecast_sinv`). You choose
 - **Mostly local:** apart from Anker, all systems are read on the local network – no cloud account, no internet connection needed.
 - **Read only:** the local connections only read values; S-INV never writes settings to these devices.
 - **Device "S-INV Anlage" (installation):** combines all inverters, batteries and meters of all S-INV entries into one set of totals – ready for the energy dashboard.
+- **Heat pumps (S-INV HP):** a separate aggregate next to the inverter installation. Bosch/Buderus via EMS-ESP (local, read only, no password or token), Stiebel Eltron via the ISG Modbus TCP/IP interface (read only; the ISG has no electric-power register, so use the bridge or a meter for that), or any existing heat-pump integration via the bridge. The setup asks whether you add an inverter or a heat pump.
 - **Several systems at once:** mix manufacturers, for example a Fronius inverter, a Hoymiles balcony system and a Zendure battery.
 
 ## Supported systems
@@ -36,6 +37,12 @@ Status: **tested** = runs on real devices; **protocol** = built from the manufac
 | SolaX | X1/X3-Hybrid G4, X1/X3-IES, X3-IES-P, X3-ULTRA | Modbus TCP (Pocket WiFi+LAN) | IP address | protocol |
 | Huawei | SUN2000 L1/M1/M2/M3, LUNA2000 battery | Modbus TCP (SDongle or inverter access point) | IP address, Modbus TCP enabled on the dongle | protocol |
 | Solakon | Solakon ONE | Modbus TCP | IP address | protocol |
+| Deye | Three-phase hybrid, low voltage (0x0500) and high voltage (0x0600) | Solarman V5 (port 8899) or Modbus TCP (port 502), read only | IP address; for Solarman V5 also the logger serial | built from Deye protocol V105.4 |
+| Deye | Single-phase hybrid (0x0300) | Solarman V5 (port 8899) or Modbus TCP (port 502), read only, blocks of at most 16 registers | IP address; for Solarman V5 also the logger serial | built from community register maps – please report deviations; grid power pending tester data |
+| Deye | String inverter (0x0200) | Solarman V5 (port 8899) or Modbus TCP (port 502), read only | IP address; for Solarman V5 also the logger serial | built from community register maps – please report deviations |
+| Deye | Microinverter (0x0400) | Solarman V5 (port 8899) or Modbus TCP (port 502), read only | IP address; for Solarman V5 also the logger serial | built from community register maps – please report deviations |
+| Solplanet | String and hybrid (device type 1 or 3) | Modbus TCP input registers, port 502 (Ai-logger also 9999), unit 3 or 239, read only | IP address | built from AISWEI protocol MB001 V2.1.3; Ai-Dongle (port 8484) not yet supported; grid, house and battery power signs are not stated |
+| Maxxisun | MaxxiCharge (CCU firmware .44-.48) | Local: CCU pushes to a Home Assistant webhook | maxxisun app: local server + API route | built from protocol |
 
 Grid values (import, export) require a meter connected to the inverter or battery, as described in the setup dialog of each manufacturer.
 
@@ -79,6 +86,21 @@ S-INV does not change the energy dashboard settings itself, because existing gri
 | Battery state of charge | `sensor.sinv_battery_soc` |
 
 Use only these installation sensors, not additionally the counters of single devices or other sensors for the same energy.
+
+The same device publishes daily counters that reset at local midnight. Use them for automations and other integrations. Do not add them to the energy dashboard; the total counters above already include that energy.
+
+| Daily counter | Sensor |
+|---|---|
+| Grid import today | `sensor.sinv_energy_grid_import_today` |
+| Grid export today | `sensor.sinv_energy_grid_export_today` |
+| Battery charged today | `sensor.sinv_energy_battery_charge_today` |
+| Battery discharged today | `sensor.sinv_energy_battery_discharge_today` |
+| House energy today | `sensor.sinv_energy_house_today` |
+| Solar energy today | `sensor.sinv_energy_solar_today` |
+
+House energy total is `sensor.sinv_energy_house_total`: the measured counter when a system reports one, otherwise calculated from the installation totals. A daily counter is the measured device value when that exists, otherwise the rise of the matching total since local midnight.
+
+Instantaneous power flows are `sensor.sinv_power_solar_to_house`, `sensor.sinv_power_solar_to_battery`, `sensor.sinv_power_grid_to_battery`, `sensor.sinv_power_battery_to_house` and `sensor.sinv_power_grid_to_house`. A measured device flow is kept. Otherwise S-INV derives the missing flow from the installation power (PV to the house first, then the battery, then the grid). These are watts for automations and other integrations, not energy-dashboard counters. The three battery flows exist only when the installation has a battery.
 
 ## Early BETA notes
 

@@ -307,7 +307,7 @@ def build_devices(regs: dict[int, int]) -> dict[str, SungrowDevice]:
         _set(device, "energy_grid_export_total", _scaled(exported, 10), 1)
         load = s32(regs, 13008)
         if load is not None:
-            _set(device, "power_house", max(0, load), 0)
+            _set(device, "power_house", load, 0)
 
     capacity = _scaled(u16(regs, 5639), 100)
     if capacity is None:

@@ -220,4 +220,9 @@ def build_devices(report: Any) -> dict[str, ZendureDevice]:
         value = _num(props.get(source))
         if value is not None:
             device.vendor[key] = round(value)
+    ac_out = _num(props.get("outputHomePower"))
+    ac_in = _num(props.get("gridInputPower"))
+    if ac_out is not None and ac_in is not None:
+        _set(device, "power_ac_net", ac_out - ac_in, 0)
+        device.derived.add("power_ac_net")
     return {device.serial: device}

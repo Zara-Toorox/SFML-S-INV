@@ -283,6 +283,14 @@ def build_devices(responses: dict[str, Any]) -> dict[str, FroniusDevice]:
     if battery is not None:
         devices[battery.serial] = battery
     _apply_sunspec(inverter, battery, responses.get("sunspec_mppt") or [])
+    if battery is None:
+        # without a battery the AC output is the net AC power of the system; an
+        # inverter asleep at night reports no PAC while the Datamanager answers
+        pac = _num(common.get("PAC"))
+        if pac is None and flow:
+            pac = 0.0
+        if pac is not None:
+            _set(inverter, "power_ac_net", pac, 0)
     return devices
 
 

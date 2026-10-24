@@ -17,8 +17,14 @@ values are high word first. "Faktor" is the divisor of the raw value.
 Documented signs used directly:
 - [Meter collection] active power 39168: positive = feeding the grid ->
   contract ``power_grid`` (positive import) = -39168
-- [Energy storage module 1] charge/discharge power 39162: positive = charging
-  -> contract ``power_battery``
+Battery power: Battery 1 power 39230 (I32 W) is negative while charging. Not
+documented in the PDF; verified on an MQ2200-M-H (2026-10-15 13:39, two users'
+screenshots side by side with Solakon's integration): -953 W while charging at
+37 V and -25.5 A (V x I = -943 W) with PV 1535 W and AC output 501 W. The
+"[Energy storage module 1]" register 39162 read -510 W at that moment and is not
+the battery of the Solakon ONE. -> contract ``power_battery`` = -39230
+BMS1 counts as present when 37002 reports online or when it reports a design
+energy and a state of health; MQ2200 firmware leaves 37002 unset.
 Grid roles need a meter or CT connected to the Solakon ONE (38801 = 1). The house
 consumption is derived: inverter active power minus the meter's feed-in. The
 energy counters 39621/39625 ("output"/"enter") are the device's own AC output and
@@ -45,7 +51,7 @@ IDENTITY_BLOCKS: tuple[tuple[int, int], ...] = ((30000, 32), (39050, 3))
 INPUT_BLOCKS: tuple[tuple[int, int], ...] = (
     (39118, 24),  # PV total, grid voltage, inverter power, frequency, temperature
     (39149, 21),  # yield, battery power, meter power
-    (39225, 2),  # load power
+    (39225, 14),  # load power, battery 1/2 voltage, current and power
     (39601, 28),  # energy counters
     (37002, 1),  # BMS1 online
     (37609, 27),  # BMS1 values
@@ -176,6 +182,14 @@ def _battery(
     )
 
 
+def _bms_present(regs: dict[int, int], online: int, base: int) -> bool:
+    """BMS online flag, or a design energy with a valid state of health. @zara"""
+    if u16(regs, online) == ONLINE:
+        return True
+    soh = u16(regs, base + 15)
+    return bool(u16(regs, base + 26)) and soh is not None and 0 < soh <= 100
+
+
 def build_devices(regs: dict[int, int]) -> dict[str, SolakonDevice]:
     """Parse identity and running registers into the Solakon ONE device. @zara"""
     ident = identity(regs)
@@ -225,13 +239,13 @@ def build_devices(regs: dict[int, int]) -> dict[str, SolakonDevice]:
         _set(device, "energy_grid_export_total", _scaled(u32(regs, 39613), 100), 2)
         _set(device, "energy_grid_import_total", _scaled(u32(regs, 39617), 100), 2)
         if active is not None:
-            _set(device, "power_house", max(0, active - meter), 0)
+            _set(device, "power_house", active - meter, 0)
             device.derived.add("power_house")
 
     packs = [
         _battery(regs, base)
         for online, base in ((37002, 37609), (37700, 38307))
-        if u16(regs, online) == ONLINE
+        if _bms_present(regs, online, base)
     ]
     # battery SoC register of the device itself (not in the PDF, used by Solakon's
     # own integration); covers firmware whose BMS registers stay empty
@@ -251,10 +265,11 @@ def build_devices(regs: dict[int, int]) -> dict[str, SolakonDevice]:
         health = [pack[2] for pack in packs]
         if health and all(health):
             _set(device, "battery_soh", min(health), 0)
-        if u16(regs, 37002) == ONLINE:
+        if _bms_present(regs, 37002, 37609):
             # highest cell temperature of BMS1
             _set(device, "temperature_battery", _scaled(s16(regs, 37617), 10))
-        battery = s32(regs, 39162)
+        raw = s32(regs, 39230)
+        battery = None if raw is None else -raw
         if battery is not None:
             _set(device, "power_battery", battery, 0)
             _set(device, "power_battery_charge", max(0, battery), 0)
