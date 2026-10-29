@@ -12,8 +12,10 @@
 One config entry of its own owns the system entities, so they survive adding or
 removing inverter instances. Each system entity follows the device entities of its
 role (found through the entity registry by unique_id) and combines them by the
-aggregation rule of the contract. A missing device value makes the system value
-unavailable, so totals never drop. Daily counters and house energy are derived
+aggregation rule of the contract. A missing device value of a sum is replaced
+(last power for a short hold, then 0 W; last counter reading) while another
+device still reports; otherwise the system value is unavailable, so totals never
+drop. Daily counters and house energy are derived
 when no device reports them and their inputs exist. Power flows are derived
 the same way from the installation power when no device measures that flow.
 """
@@ -40,6 +42,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
+    async_call_later,
     async_track_point_in_utc_time,
     async_track_state_change_event,
 )
@@ -58,12 +61,18 @@ SOURCES_ATTR = "sinv_sources"
 SOURCE_ATTR = "sinv_source"
 OFFSET_ATTR = "sinv_source_offset"
 AGGREGATION_ATTR = "sinv_aggregation"
+MISSING_ATTR = "sinv_missing_sources"
 _FLOW_STARTED = f"{DOMAIN}_site_flow_started"
 _SITE_DAILY = f"{DOMAIN}.site_daily"
 _SITE_SOURCES = f"{DOMAIN}.site_sources"
 # Longer than a restart and a few missed Solarbank messages, shorter than
 # leaving the counter empty while the smart meter still has a reading.
 SOURCE_HOLD = timedelta(minutes=15)
+# A short device gap (a DTU blip, a reconnect) keeps the last power. A device
+# that stays away longer, e.g. a micro inverter asleep at night, counts as 0 W.
+POWER_HOLD = timedelta(minutes=5)
+# Persisting counter readings on every update would rewrite the store constantly.
+READINGS_SAVE_DELAY = 300.0
 _INDEX = re.compile(r"^sinv_[a-z]{2}(\d\d)_")
 
 
@@ -87,6 +96,77 @@ class SourceCont:
     published: float | None
     missing_since: str | None = None
     live: bool = True
+
+
+@dataclass(frozen=True)
+class LastReading:
+    """Last live value of one device entity that feeds a sum. @zara"""
+
+    value: float
+    day: str
+    seen: datetime | None = None
+
+
+@dataclass(frozen=True)
+class Fill:
+    """Device values of a sum after missing ones were replaced. @zara"""
+
+    values: list[float | None]
+    substituted: list[str]
+    held: bool = False
+    changed: bool = False
+
+
+def fill_missing(
+    role: str,
+    readings: list[tuple[str, float | None]],
+    last: dict[str, LastReading],
+    now: datetime,
+    day: str,
+) -> Fill:
+    """Replace missing device values of a sum role while another device reports. @zara
+
+    Power keeps the last value for POWER_HOLD, then counts 0 W. A counter keeps its
+    last reading; a day counter only on the same local day, afterwards 0. A counter
+    without any reading stays missing. Updates ``last`` with every live value.
+    """
+    if not readings or all(value is None for _, value in readings):
+        return Fill([value for _, value in readings], [])
+    power = role.startswith("power_")
+    today = role.endswith("_today")
+    values: list[float | None] = []
+    substituted: list[str] = []
+    held = False
+    changed = False
+    for entity_id, value in readings:
+        known = last.get(entity_id)
+        if value is not None:
+            if not power and (
+                known is None or known.value != value or known.day != day
+            ):
+                changed = True
+            last[entity_id] = LastReading(value, day, now)
+            values.append(value)
+            continue
+        if power:
+            if (
+                known is not None
+                and known.seen is not None
+                and now - known.seen <= POWER_HOLD
+            ):
+                values.append(known.value)
+                held = True
+            else:
+                values.append(0.0)
+        elif known is None:
+            values.append(None)
+            continue
+        elif today and known.day != day:
+            values.append(0.0)
+        else:
+            values.append(known.value)
+        substituted.append(entity_id)
+    return Fill(values, substituted, held, changed)
 
 
 def source_now() -> datetime:
@@ -370,6 +450,9 @@ class SourceTracker:
     def __init__(self) -> None:
         """Start with no stored source. @zara"""
         self._roles: dict[str, SourceCont] = {}
+        # Last counter reading per device entity, so a sum survives a device
+        # that is missing after a restart.
+        self.readings: dict[str, LastReading] = {}
 
     def get(self, role: str) -> SourceCont | None:
         """Return the stored continuation of one role. @zara"""
@@ -391,7 +474,11 @@ class SourceTracker:
                     "live": cont.live,
                 }
                 for role, cont in self._roles.items()
-            }
+            },
+            "readings": {
+                entity_id: {"value": reading.value, "day": reading.day}
+                for entity_id, reading in self.readings.items()
+            },
         }
 
     @classmethod
@@ -400,6 +487,12 @@ class SourceTracker:
         tracker = cls()
         if not isinstance(raw, dict):
             return tracker
+        readings = raw.get("readings")
+        if isinstance(readings, dict):
+            for entity_id, item in readings.items():
+                reading = _parse_reading(entity_id, item)
+                if reading is not None:
+                    tracker.readings[entity_id] = reading
         roles = raw.get("roles")
         if not isinstance(roles, dict):
             return tracker
@@ -408,6 +501,18 @@ class SourceTracker:
             if parsed is not None:
                 tracker._roles[role] = parsed
         return tracker
+
+
+def _parse_reading(entity_id: Any, item: Any) -> LastReading | None:
+    if not isinstance(entity_id, str) or not isinstance(item, dict):
+        return None
+    value = item.get("value")
+    day = item.get("day")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if not math.isfinite(value) or not isinstance(day, str):
+        return None
+    return LastReading(float(value), day)
 
 
 def _parse_source(role: Any, item: Any) -> SourceCont | None:
@@ -447,11 +552,25 @@ class SiteSources:
         self._store = store
         # Runtime only. A stored continuation is never replaced from here.
         self.seeds: dict[str, float | None] = {}
+        # Runtime only: a held power is worthless after a restart.
+        self.power_seen: dict[str, LastReading] = {}
+        self._readings_pending = False
 
     def save(self) -> None:
         """Persist the tracker when a store is attached. @zara"""
         if self._store is not None:
-            self._store.async_delay_save(self.tracker.snapshot, 1.0)
+            self._store.async_delay_save(self._snapshot, 1.0)
+
+    def save_readings(self) -> None:
+        """Persist counter readings once per delay, not on every update. @zara"""
+        if self._store is None or self._readings_pending:
+            return
+        self._readings_pending = True
+        self._store.async_delay_save(self._snapshot, READINGS_SAVE_DELAY)
+
+    def _snapshot(self) -> dict[str, Any]:
+        self._readings_pending = False
+        return self.tracker.snapshot()
 
 
 async def ensure_site_sources(hass: HomeAssistant) -> SiteSources:
@@ -695,8 +814,11 @@ class _SiteEntity:
         self._balance: list[Source] | None = None
         self._balance_used = False
         self._all_sources: dict[str, list[Source]] = {}
+        # device entities whose missing value was replaced in the last read
+        self._missing: set[str] = set()
         self._unsub_states = None
         self._unsub_midnight = None
+        self._unsub_hold = None
         self._attr_unique_id = contract.system_unique_id(role)
         self._attr_translation_key = f"sinv_{spec.base}"
         self._attr_translation_placeholders = (
@@ -724,6 +846,7 @@ class _SiteEntity:
         )
         self.async_on_remove(self._unsubscribe)
         self.async_on_remove(self._cancel_midnight)
+        self.async_on_remove(self._cancel_hold)
 
     @callback
     def _registry_changed(self, _event: Event) -> None:
@@ -824,6 +947,59 @@ class _SiteEntity:
             self._unsub_midnight()
             self._unsub_midnight = None
 
+    @callback
+    def _arm_hold(self) -> None:
+        """Re-read once a held power expires, even if no other device changes. @zara"""
+        if self._unsub_hold is not None:
+            return
+        self._unsub_hold = async_call_later(
+            self.hass, POWER_HOLD.total_seconds() + 1, self._on_hold_expired
+        )
+
+    @callback
+    def _on_hold_expired(self, _now) -> None:
+        self._unsub_hold = None
+        self.async_write_ha_state()
+
+    @callback
+    def _cancel_hold(self) -> None:
+        if self._unsub_hold is not None:
+            self._unsub_hold()
+            self._unsub_hold = None
+
+    def _sum_values(self, role: str, sources: list[Source]) -> list[float | None]:
+        """Device values of a sum role with missing devices replaced. @zara"""
+        holder = self._site_sources()
+        power = role.startswith("power_")
+        fill = fill_missing(
+            role,
+            [
+                (source.entity_id, _float(self.hass.states.get(source.entity_id)))
+                for source in sources
+            ],
+            holder.power_seen if power else holder.tracker.readings,
+            source_now(),
+            installation_local_day(),
+        )
+        if fill.changed:
+            holder.save_readings()
+        if fill.held:
+            self._arm_hold()
+        self._missing.update(fill.substituted)
+        return fill.values
+
+    def _site_sources(self) -> SiteSources:
+        data = getattr(self.hass, "data", None)
+        if not isinstance(data, dict):
+            data = {}
+            self.hass.data = data
+        holder = data.get(_SITE_SOURCES)
+        if isinstance(holder, SiteSources):
+            return holder
+        holder = SiteSources(SourceTracker())
+        data[_SITE_SOURCES] = holder
+        return holder
+
     @property
     def available(self) -> bool:
         """Available while every source reports a value. @zara"""
@@ -866,14 +1042,19 @@ class _SiteEntity:
                 SOURCES_ATTR: sources,
                 contract.ATTR_DERIVED: True,
             }
-            return attributes
-        balance = self._balance if self._balance_used else []
-        return {
-            contract.ATTR_CONTRACT: contract.CONTRACT_VERSION,
-            contract.ATTR_ROLE: self.role,
-            AGGREGATION_ATTR: contract.AGG_HOUSE_BALANCE if balance else self._rule,
-            SOURCES_ATTR: [source.entity_id for source in [*self._sources, *balance]],
-        }
+        else:
+            balance = self._balance if self._balance_used else []
+            attributes = {
+                contract.ATTR_CONTRACT: contract.CONTRACT_VERSION,
+                contract.ATTR_ROLE: self.role,
+                AGGREGATION_ATTR: contract.AGG_HOUSE_BALANCE if balance else self._rule,
+                SOURCES_ATTR: [
+                    source.entity_id for source in [*self._sources, *balance]
+                ],
+            }
+        if self._missing:
+            attributes[MISSING_ATTR] = sorted(self._missing)
+        return attributes
 
     def _current(self):
         raise NotImplementedError
@@ -968,6 +1149,7 @@ class SiteSensor(_SiteEntity, RestoreSensor, SensorEntity):
         )
 
     def _current(self) -> float | None:
+        self._missing = set()
         if self._sources and contract.continues_total(self.role):
             return self._continued(self.role, self._sources)
         if not self._sources:
@@ -986,7 +1168,10 @@ class SiteSensor(_SiteEntity, RestoreSensor, SensorEntity):
         if self.role == "power_house":
             return self._house_power()
         self._balance_used = False
-        values = [_float(get(source.entity_id)) for source in self._sources]
+        if self._rule == contract.AGG_SUM:
+            values = self._sum_values(self.role, self._sources)
+        else:
+            values = [_float(get(source.entity_id)) for source in self._sources]
         weights = None
         if self.role == "battery_soc":
             weights = [
@@ -1025,23 +1210,17 @@ class SiteSensor(_SiteEntity, RestoreSensor, SensorEntity):
             return None
         if contract.continues_total(role):
             return self._continued(role, sources)
-        values = [_float(self.hass.states.get(source.entity_id)) for source in sources]
-        value = aggregate(contract.aggregation(role), values)
+        rule = contract.aggregation(role)
+        if rule == contract.AGG_SUM:
+            values = self._sum_values(role, sources)
+        else:
+            values = [
+                _float(self.hass.states.get(source.entity_id)) for source in sources
+            ]
+        value = aggregate(rule, values)
         if value is None:
             return None
         return round(float(value), 3)
-
-    def _site_sources(self) -> SiteSources:
-        data = getattr(self.hass, "data", None)
-        if not isinstance(data, dict):
-            data = {}
-            self.hass.data = data
-        holder = data.get(_SITE_SOURCES)
-        if isinstance(holder, SiteSources):
-            return holder
-        holder = SiteSources(SourceTracker())
-        data[_SITE_SOURCES] = holder
-        return holder
 
     def _continued(self, role: str, sources: list[Source]) -> float | None:
         """Value of a lifetime counter after its stored source offset. @zara"""

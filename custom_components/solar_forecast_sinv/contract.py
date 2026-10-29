@@ -651,7 +651,7 @@ AGG_HOUSE_BALANCE = "house_plus_foreign_ac"
 # vendors whose power_house is grid + their own net AC (an energy balance), so that
 # generators of other entries can be added; flow sums (KOSTAL) or cloud values do not
 BALANCE_HOUSE_VENDORS = frozenset(
-    {"fronius", "huawei", "solax", "sungrow", "solakon", "maxxisun"}
+    {"fronius", "huawei", "solax", "sungrow", "solakon", "maxxisun", "enphase"}
 )
 # device roles the installation reads without publishing a system entity for them
 BALANCE_SOURCE_BASES = frozenset({"power_ac_net"})

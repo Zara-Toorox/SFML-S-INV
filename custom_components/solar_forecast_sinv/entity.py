@@ -438,7 +438,9 @@ def assign_role_identity(hass, domain: str, serial: str, role: str, unique_id: s
 
 def _demote_retired_role(hass, registry, entry, domain, parsed, contexts, data) -> bool:
     """Turn a role entry whose key became a vendor value into that vendor entity. @zara"""
-    key = anker.RETIRED_ROLES.get(parsed["role"])
+    key = anker.RETIRED_ROLES.get(parsed["role"]) or anker.FLOW_ROLE_VENDOR_KEY.get(
+        parsed["role"]
+    )
     context = next((c for c in contexts if c.lower() == parsed["serial"]), None)
     if key is None or context is None:
         return False

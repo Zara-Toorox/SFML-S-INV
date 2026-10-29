@@ -27,7 +27,7 @@ S-INV publishes two levels:
 | unique_id (device role) | `sinv:1:<device_serial_lower>:<role>` | `sinv:1:apcdjqd0g19200073:power_solar_mppt_01` |
 | unique_id (vendor) | `sinv:1:<device_serial_lower>:<vendor>:<key>` | `sinv:1:apcdjqd0g19200073:anker:wifi_signal` |
 | State attributes (device roles) | `sinv_contract`, `sinv_role`, `sinv_device_index`, `sinv_vendor` | `sinv_role: power_solar_mppt_01` |
-| State attributes (system) | `sinv_contract`, `sinv_role`, `sinv_aggregation`, `sinv_sources`; `sinv_derived: true` when the value is calculated; continued lifetime totals also carry `sinv_source` and `sinv_source_offset` | `sinv_sources: [sensor.sinv_iv01_power_solar]` |
+| State attributes (system) | `sinv_contract`, `sinv_role`, `sinv_aggregation`, `sinv_sources`; `sinv_derived: true` when the value is calculated; continued lifetime totals also carry `sinv_source` and `sinv_source_offset`; `sinv_missing_sources` while missing device values are replaced | `sinv_sources: [sensor.sinv_iv01_power_solar]` |
 
 The device index is assigned per class in order of first discovery and never changes afterwards. One device can carry
 several classes (a Solarbank is `iv01` and `bt01`).
@@ -45,8 +45,18 @@ several classes (a Solarbank is `iv01` and `bt01`).
 | device only | MPPT channels, grid voltage/frequency, temperatures, state of health, battery packs, `power_ac_net` | no system entity |
 | derived | daily energy and house energy when no device reports that role | calculated from installation totals; `sinv_derived: true` |
 
-A system value is unavailable while one of its device values is missing, so totals never drop. Without a signed grid
-value, `power_grid` of the installation is `power_grid_import − power_grid_export` of the grid meter.
+A system value is unavailable while one of its device values is missing, so totals never drop. The rule `sum` is the
+exception while at least one of its devices still reports: a missing power keeps the device's last value for 5 minutes
+(a short gap such as a DTU reconnect) and then counts as 0 W (e.g. a micro inverter that switches off at night). A
+missing energy counter or `capacity_battery` keeps the device's last reading, so the total does not drop and catches up
+when the device returns; a day counter (`*_today`) keeps it only on the same local day and counts 0 afterwards. Counter
+readings are stored with the installation and survive a restart; a counter device without any reading leaves the sum
+unavailable. The sum carries `sinv_missing_sources` with the device entities replaced at that moment, and a derived
+flow lists the devices replaced in its inputs. Every other rule stays unavailable on a missing device value. While a
+device is replaced by 0 W, its production is missing from the installation and derived flows show that share as grid.
+
+Without a signed grid value, `power_grid` of the installation is `power_grid_import − power_grid_export` of the grid
+meter.
 
 `energy_grid_import_total`, `energy_grid_export_total` and `energy_house_total` are the exception to "the first
 device". They are lifetime counters (`total_increasing`). The installation keeps using one source and, when that
@@ -82,7 +92,7 @@ so a sum would count the grid import twice. The device reporting `power_house` (
 knows its own system, e.g. a Fronius GEN24 does not know a second Symo on its own Datamanager. When exactly one device
 reports `power_house` and generators (devices with `power_solar`, `power_inverter_ac_output` or `power_battery`) of other
 S-INV entries exist, the installation adds their `power_ac_net` (rule `house_plus_foreign_ac`). This requires an owner
-whose `power_house` is an energy balance of grid and its own AC power (Fronius, Huawei, SolaX, Sungrow, Solakon; not
+whose `power_house` is an energy balance of grid and its own AC power (Fronius, Huawei, SolaX, Sungrow, Solakon, maxxisun, Enphase; not
 KOSTAL flow sums or Anker cloud values). If any such generator has no `power_ac_net`, the owner is not a balance
 vendor, or more than one device reports `power_house`, the rule stays `single`. While a foreign value is missing
 (device offline), the owner's value is used alone for that moment. Device `power_house` values are not clamped; the
@@ -193,7 +203,7 @@ IDs are renamed to `sinv_<class><nn>_<role>`. Entity IDs chosen by the user are 
 | `current_solar_mppt_NN` | A | sensor | PV current of input NN |
 | `energy_solar_total`, `energy_solar_today` | kWh | sensor | PV energy; `energy_solar_today` is derived from the total when no device reports the day |
 | `power_inverter_ac_output` | W | sensor | AC output of the inverter |
-| `power_ac_net` | W | sensor | net AC power of a device: positive = delivered into the house grid, negative = drawn from it. Published only where the sign is unambiguous: Hoymiles microinverters (= AC output), Fronius inverters without battery (= PAC, 0 while asleep) and Zendure (AC output − AC input); hybrid inverters do not publish it |
+| `power_ac_net` | W | sensor | net AC power of a device: positive = delivered into the house grid, negative = drawn from it. Published only where the sign is unambiguous: Hoymiles and Enphase microinverters (= AC output), Fronius inverters without battery (= PAC, 0 while asleep) and Zendure (AC output − AC input); hybrid inverters do not publish it |
 | `voltage_grid`, `frequency_grid` | V, Hz | sensor | grid quality at the inverter |
 | `temperature_inverter` | °C | sensor | |
 | `state_grid_export_allowed` | on/off | binary_sensor, switch | grid export permitted |
@@ -405,6 +415,23 @@ WPM energy counters move slowly, and another integration may poll the same ISG. 
 | `hp_energy_electric_dhw_today` / `_total` | 3514 day; 3515 kWh + 3516 MWh | `fts.txt:1505`–`1507` |
 | `hp_energy_thermal_total` / `_today` and `hp_energy_electric_total` / `_today` | heating + hot water, only when both parts exist | derived from the rows above |
 
+## Night sleep
+
+Polled local energy instances (every local connection except the maxxisun webhook and the heat pump paths) follow
+one night rule. Micro inverters with a built-in DTU, PV-side data loggers and small string inverters drop off the
+network at night. When a poll finds the device not reachable at all (connection refused, no route, timeout; an
+`OSError` or `TimeoutError` cause) while the sun at the Home Assistant location is below 5° elevation, and every
+device of the instance is pure PV (no role starting with `power_battery`, `energy_battery`, `battery_`,
+`capacity_battery`, `power_grid`, `energy_grid`, `power_house` or `energy_house`), the instance publishes its devices
+asleep: every `power_*` role 0 W, every `energy_*` role at its last reading, every other role and vendor value
+unavailable. Above 5°, for an answer that cannot be read, or for a device with battery or grid values (a hybrid
+inverter feeds the house from its battery at night), the failure stays and the entities are unavailable.
+
+The last good reading of every device (identity, power roles, energy counters) is stored per config entry, written at
+most every 5 minutes and on shutdown, and deleted with the entry. A restart at night therefore starts asleep from the
+stored devices instead of failing setup. A device without a stored reading is never invented: the instance waits for
+the first answer as before. Falling asleep and waking up are logged once each at info level.
+
 ## Planned
 
 Wallboxes (e.g. Fronius Wattpilot) as further S-INV instances. Heat-pump manufacturers connected so far are
@@ -421,7 +448,7 @@ transition period in which both versions are published.
 
 | Manufacturer | Connection | Roles published |
 |---|---|---|
-| Anker Solix | Cloud (account + MQTT) | `power_solar`, `power_solar_mppt_NN`, `voltage_solar_mppt_NN`, `current_solar_mppt_NN` (Solarbank 3), `power_inverter_ac_output`, `voltage_grid`, `frequency_grid` (Solarbank 3), `state_grid_export_allowed`, `state_curtailment`, `battery_soc`, `power_battery`, `power_battery_charge`, `power_battery_discharge`, `power_grid_to_battery`, `power_solar_to_battery` (derived where the device does not report it), `power_grid_to_house`, `power_battery_to_house`, `power_solar_to_house` (derived, solarbanks), `battery_pack_soc_NN`, `temperature_battery_pack_NN`, `power_grid_import`, `power_grid_export` (smart meter; `power_grid` of the installation is derived from both), `power_house`, `energy_solar_total`, `energy_battery_charge_total`, `energy_battery_discharge_total`, `energy_grid_import_total`, `energy_grid_export_total`, `energy_house_total`, `energy_solar_today`, `energy_house_today` |
+| Anker Solix | Cloud (account + MQTT) | `power_solar`, `power_solar_mppt_NN`, `voltage_solar_mppt_NN`, `current_solar_mppt_NN` (Solarbank 3), `power_inverter_ac_output`, `voltage_grid`, `frequency_grid` (Solarbank 3), `state_grid_export_allowed`, `state_curtailment`, `battery_soc`, `power_battery`, `power_battery_charge`, `power_battery_discharge`, `power_grid_to_battery`, `power_solar_to_battery`, `power_grid_to_house`, `power_battery_to_house`, `power_solar_to_house` (installation-derived; Anker publishes none of these flow roles), `battery_pack_soc_NN`, `temperature_battery_pack_NN`, `power_grid_import`, `power_grid_export` (smart meter; `power_grid` of the installation is derived from both), `power_house`, `energy_solar_total`, `energy_battery_charge_total`, `energy_battery_discharge_total`, `energy_grid_import_total`, `energy_grid_export_total`, `energy_house_total`, `energy_solar_today`, `energy_house_today` |
 | Fronius | Local network (Solar API v1, IP address only; optional SunSpec Modbus TCP on GEN24, read only) | `power_solar`, `power_solar_mppt_NN` (derived V×I), `voltage_solar_mppt_NN`, `current_solar_mppt_NN`, `power_inverter_ac_output`, `voltage_grid`, `frequency_grid`, `power_house`, `battery_soc`, `capacity_battery`, `temperature_battery`, `power_battery`, `power_battery_charge`, `power_battery_discharge`, `power_grid`, `power_grid_import`, `power_grid_export`, `energy_grid_import_total`, `energy_grid_export_total` (meter at the grid point); with Modbus TCP: `energy_solar_total`, measured `power_solar_mppt_NN`, `energy_battery_charge_total`, `energy_battery_discharge_total` |
 | Zendure SolarFlow (zenSDK) | Local network (zenSDK HTTP API, IP address only) | `power_solar`, `power_solar_mppt_NN`, `power_inverter_ac_output`, `power_battery`, `power_battery_charge`, `power_battery_discharge`, `battery_soc`, `battery_pack_soc_NN`, `temperature_battery_pack_NN`, `temperature_inverter` |
 | Hoymiles via OpenDTU | Local network (OpenDTU REST API) | per inverter: `power_solar`, `power_solar_mppt_NN`, `voltage_solar_mppt_NN`, `current_solar_mppt_NN`, `power_inverter_ac_output`, `voltage_grid`, `frequency_grid`, `temperature_inverter`, `energy_solar_today`, `energy_solar_total` |
@@ -437,6 +464,8 @@ transition period in which both versions are published.
 | Deye string | Same transports; device type 0x0200 | `power_solar`, `voltage_solar_mppt_NN`, `current_solar_mppt_NN`, `power_inverter_ac_output`, `voltage_grid`, `frequency_grid`, `temperature_inverter`, `energy_solar_total`, `energy_solar_today`, `energy_grid_import_total`, `energy_grid_export_total`, `energy_grid_import_today`, `energy_grid_export_today`, `energy_house_total`, `energy_house_today` |
 | Deye microinverter | Same transports; device type 0x0400 | `voltage_solar_mppt_NN`, `current_solar_mppt_NN`, `power_inverter_ac_output`, `voltage_grid`, `frequency_grid`, `temperature_inverter`, `energy_solar_total`, `energy_solar_today` |
 | Solplanet | Local network (Modbus TCP, port 502 or Ai-logger 9999, unit 3 or 239, input registers, read only) | `power_solar` (sum of MPPT V×I), `power_solar_mppt_NN` (derived), `voltage_solar_mppt_NN`, `current_solar_mppt_NN`, `power_inverter_ac_output`, `voltage_grid`, `frequency_grid`, `temperature_inverter`, `energy_solar_total`, `energy_solar_today`, `battery_soc`, `battery_soh`, `temperature_battery` (battery roles only while battery status is not "not available") |
+| Enphase IQ Gateway | Local network (IQ Gateway local API, HTTPS with owner Bearer token, read only) | per microinverter: `power_solar` (= AC report), `power_inverter_ac_output`, `power_ac_net`; gateway with production CT: `energy_solar_total`; with net-consumption CT: `power_grid`, `power_grid_import`, `power_grid_export` (derived), `energy_grid_import_total`, `energy_grid_export_total`; with both CTs: `power_house` (derived) |
+| Sigenergy hybrid | Local network (Modbus TCP, port 502, inverter address 1–246 and plant address 247, input registers only) | `power_solar`, `power_solar_mppt_NN` (derived, per PV string), `voltage_solar_mppt_NN`, `current_solar_mppt_NN`, `power_inverter_ac_output`, `voltage_grid`, `frequency_grid`, `temperature_inverter`, `energy_solar_today`, `energy_solar_total`, `capacity_battery`, `battery_soc`, `battery_soh`, `temperature_battery`, `power_battery`, `power_battery_charge`, `power_battery_discharge` (derived), `energy_battery_charge_today`, `energy_battery_discharge_today`, `energy_battery_charge_total`, `energy_battery_discharge_total`; with grid sensor: `power_grid`, `power_grid_import`, `power_grid_export` (derived), `energy_grid_import_total`, `energy_grid_export_total`, `power_house`, `energy_house_today`, `energy_house_total` |
 | maxxisun MaxxiCharge | Local webhook (CCU pushes JSON, firmware .44 to .48, read only) | `power_solar`, `power_solar_mppt_NN`, `power_inverter_ac_output`, `power_grid`, `power_grid_import`, `power_grid_export`, `power_house` (derived), `power_battery`, `power_battery_charge`, `power_battery_discharge` (derived), `battery_soc`, `battery_pack_soc_NN`, `temperature_inverter` |
 | Bosch/Buderus | Local EMS-ESP HTTP, read only, no token | every S-INV HP role the gateway reports; see the EMS-ESP table under S-INV HP. COP and day counters are derived |
 | Stiebel Eltron | Local ISG Modbus TCP, function 04 only, port 502, unit 1 | the plant roles in the Stiebel table under S-INV HP. No electric power, so live COP is absent; `hp_cop_total` is derived from the energy totals. Day counters come from the ISG |
@@ -448,7 +477,11 @@ Fronius Modbus TCP (option, on by default): S-INV walks the SunSpec model chain 
 
 Zendure: one S-INV instance per device (IP address); the local zenSDK API must be switched on in the Zendure app ("Add HEMS"). `power_battery` = `outputPackPower` − `packInputPower` (+ charging), pack temperature = (`maxTemp` − 2731) / 10 °C. `temperature_inverter` = (`hyperTmp` − 2731) / 10 °C, published between −30 and 90 °C; the battery voltage `BatVolt` / 100 V (vendor value, 36–60 V) and the target and minimum state of charge (`socSet`, `minSoc` / 10 %) are vendor values; ranges guard against other scalings on other models. The AC input power stays a vendor value. Zendure reports no grid values and no energy counters; use the external grid meter for the grid roles.
 
-Hoymiles: one S-INV instance per OpenDTU or per DTU; every microinverter behind it is its own device. A microinverter has no battery, so its AC energy is its solar energy. Inverters that are off at night read 0 W (energy counters kept) so installation totals stay available; an unreadable DTU answer is an error, never 0 W. The DTU is polled every 35 s (minimum 30 s) because DTUs suffer from frequent requests. On the DTU protobuf path a whole answer is discarded (UpdateFailed, entities unavailable for that cycle, reason logged once per consecutive series) when every inverter grid voltage is 0 or missing and every DC voltage is 0, or when one device's lifetime solar energy is below the last value accepted for that device in this session. The tolerance is 0.0005 kWh, half of the 0.001 kWh rounding step, because the source is integer Wh published to 3 decimals. A lower lifetime total becomes the new baseline only after three consecutive answers whose value does not fall below the previous discarded reading of that device; one info line records that the counter reset was accepted. A single low answer stays discarded, and a null frame does not count toward the three and breaks the series. Those last values are kept in coordinator memory only. The next valid answer is published as usual. An inverter that produces 0 W and still reports grid voltage (evening) is kept.
+Hoymiles: one S-INV instance per OpenDTU or per DTU; every microinverter behind it is its own device. A microinverter has no battery, so its AC energy is its solar energy. Inverters that are off at night read 0 W (energy counters kept) so installation totals stay available: an inverter missing from a DTU answer for three cycles, and a DTU that is not reachable at all under the night sleep rule (see Night sleep). An unreadable DTU answer is asked once more after 3 s (a DTU serves one connection at a time, so a request colliding with another client reads as garbage); a second unreadable answer is an error, never 0 W. The DTU is polled every 35 s (minimum 30 s) because DTUs suffer from frequent requests. On the DTU protobuf path a whole answer is discarded (UpdateFailed, entities unavailable for that cycle, reason logged once per consecutive series) when every inverter grid voltage is 0 or missing and every DC voltage is 0, or when one device's lifetime solar energy is below the last value accepted for that device in this session. The tolerance is 0.0005 kWh, half of the 0.001 kWh rounding step, because the source is integer Wh published to 3 decimals. A lower lifetime total becomes the new baseline only after three consecutive answers whose value does not fall below the previous discarded reading of that device; one info line records that the counter reset was accepted. A single low answer stays discarded, and a null frame does not count toward the three and breaks the series. Those last values are kept in coordinator memory only. The next valid answer is published as usual. An inverter that produces 0 W and still reports grid voltage (evening) is kept.
+
+Enphase: one S-INV instance per IQ Gateway (software 7.x or later), identified by the gateway serial number; every microinverter with `devType` 1 in `GET /api/v1/production/inverters` is its own device. The gateway answers only over HTTPS with a self-signed certificate and an owner access token (Bearer, valid one year, installer tokens 12 hours); S-INV sends the token only over HTTPS without following redirects, and a refused token (401/403) starts the reauthentication flow. The inverter list reports AC power only (`lastReportWatts`, refreshed about every 5 minutes), so `power_solar` of a microinverter is its AC output; no DC, voltage, temperature or energy values per inverter. A report older than 15 minutes reads 0 W (asleep); a report more than 5 minutes ahead of the local clock or outside 0–1000 W is not published. The CTs come from `GET /ivp/meters` (enabled and `meteringStatus` normal only) and `GET /ivp/meters/readings`; readings older than 15 minutes are not used. The production CT gives `energy_solar_total` (`actEnergyDlvd`); the net-consumption CT gives `power_grid` (`activePower`, positive = import) and the grid energy totals (`actEnergyDlvd` = import, `actEnergyRcvd` = export). With both CTs `power_house` = production CT power + `power_grid`, an energy balance, so Enphase is a balance-house vendor. Total-consumption and storage CTs and IQ Batteries are not used. Without CTs only the microinverter devices exist.
+
+Sigenergy: register map from the Sigenergy Modbus Protocol V2.9, function 0x04 only, at most 124 registers per request and 1 s between requests. The wire address is the documented register; multi-register values are high word first. One S-INV instance per hybrid inverter address (1–246, set in the MySigen app); the same connection reads the plant address 247. Power registers (gain 1000, kW) are W raw. From the plant: `power_grid` = grid sensor active power 30005 (>0 import), grid energy totals 30216/30220, `power_house` = total load power 30284 (V2.8+), house energy 30092/30094, all only while the grid sensor status 30004 is 1. `power_battery` = plant ESS power 30037 (>0 charging), published only while this inverter's rated battery capacity 30548 equals the plant's 30083 (within 1 %), because the inverter's own 30599 has no stated sign and a plant with several inverters would otherwise count the battery twice. From the inverter: PV power 31035, PV strings (string count 31025, strings 1–4 at 31027, 5–16 at 31042) as `*_solar_mppt_NN`, AC active power 30587, phase A voltage 31011, frequency 31002, PCS temperature 31003, PV energy 31509/31511, battery SoC/SoH/temperature and charge/discharge energy 30566–30603. Registers added after V2.4 are optional and dropped after an "illegal address" answer. `power_house` is not proven to be a balance, so Sigenergy is not a balance-house vendor. No `power_ac_net`.
 
 AhoyDTU: one S-INV instance per AhoyDTU; every enabled inverter is its own device. S-INV reads `GET /api/inverter/list` and `GET /api/inverter/id/<id>` (no password needed). Values come as lists in AhoyDTU's fixed field order; `YieldDay` is converted from Wh to kWh. Before an inverter's first answer AhoyDTU reports zeros, which are not published; an inverter that is not producing reads 0 W, energy counters kept.
 
@@ -472,7 +505,17 @@ Solakon: register map from the Solakon ONE Modbus Protokoll v.02/26; holding reg
 
 Anker energy counters from MQTT (`energy_solar_total`, `energy_battery_charge_total`, `energy_battery_discharge_total`, `energy_grid_import_total`, `energy_grid_export_total`, `energy_house_total`) are always created. The daily cloud statistics (`energy_solar_today`, `energy_house_today`) require the device's energy category to be enabled in the S-INV options, because they cost additional cloud requests.
 
-Anker house flows (derived for solarbanks, attribute `sinv_derived: true`):
+Anker publishes no flow roles (`power_solar_to_battery`, `power_grid_to_battery`,
+`power_battery_to_house`, `power_solar_to_house`, `power_grid_to_house`). The installation derives
+them. `grid_to_battery_power` on Solarbank 3 is param message 0405 (`mqttmap.py` `_A17C5_0405`),
+which is sent only after the realtime trigger (`A17C5` `0405` interval, command `0057`). The cache
+keeps that value until restart, so a present key is not a live measurement. Realtime message 0500
+does not contain the field. The same trigger pattern covers Solarbank 4 0405. X1 (`A5101`–`A5103`)
+and the power panel (`A17B1`) also list a realtime trigger, and their JSON intervals are unknown, so
+`g2bp` and `p2bp` are vendor values too. No Anker message that carries a flow field is documented as
+continuous without a trigger. `ac_to_home_load` stays `power_inverter_ac_output`.
+
+Anker house-flow calculation kept as a vendor value (not a measured flow):
 
 ```
 grid_to_house    = min(max(0, grid_power − grid_to_battery), house)
@@ -484,7 +527,7 @@ solar_to_house   = max(0, min(ac_output − battery_to_house, house − battery_
 
 Anker `power_solar_to_battery` (derived): battery charge power minus grid-to-battery power, bounded to 0 W … PV power.
 
-Known limitation: Anker fills grid-to-battery power in the operating state "AC charging" (seen 2026-10-11: 1191 W) but reports 0 W in the state "protection charging" although the battery charges from the grid. S-INV publishes `power_grid_to_battery` as reported; the bound on `power_solar_to_battery` keeps that role correct in both states.
+The cloud field stays unreliable: Anker fills it in the state "AC charging" (seen 2026-10-11: 1191 W) and reports 0 W in "protection charging", and on a Solarbank 3 it stayed 0 through regular grid charging (2026-10-25). It is not the installation flow.
 
 Anker `state_curtailment` rule (the device reports no curtailment flag): on while the battery is full (state of
 charge ≥ 99 %), grid export is not allowed and PV power is above 0 W.

@@ -40,7 +40,6 @@ _FIXED: dict[str, str] = {
     "battery_power_signed": "power_battery",
     "bat_charge_power": "power_battery_charge",
     "bat_discharge_power": "power_battery_discharge",
-    "grid_to_battery_power": "power_grid_to_battery",
     "home_demand_total": "power_house",
     "curtailment_active": "state_curtailment",
     # MQTT lifetime counters (kWh, total_increasing), verified against power on 2026-10-10
@@ -53,15 +52,20 @@ _FIXED: dict[str, str] = {
     # Cloud daily statistics (kWh, reset at local midnight)
     "daily_solar_production": "energy_solar_today",
     "daily_home_usage": "energy_house_today",
-    # PV to battery: vendor value where the device reports it, otherwise derived
-    "pv_to_battery_power": "power_solar_to_battery",
-    "solar_to_battery_power": "power_solar_to_battery",
-    # Solarbank AC output to the house (upstream key for solarbanks), equal to ac_output_power
+    # Solarbank AC output to the house. Not a flow role.
     "ac_to_home_load": "power_inverter_ac_output",
-    # Derived house flows for solarbanks
-    "grid_to_house_power": "power_grid_to_house",
-    "battery_to_house_power": "power_battery_to_house",
-    "solar_to_house_power": "power_solar_to_house",
+}
+
+# Anker does not publish flow roles. The fields sit in trigger messages (A17C5
+# 0405, X1 and power-panel JSON behind the realtime trigger) or in cloud
+# summaries, and a cached value would block installation derivation. The
+# vendor key keeps the history of a former role entity.
+FLOW_ROLE_VENDOR_KEY: dict[str, str] = {
+    "power_grid_to_battery": "grid_to_battery_power",
+    "power_solar_to_battery": "solar_to_battery_power",
+    "power_grid_to_house": "grid_to_house_power",
+    "power_battery_to_house": "battery_to_house_power",
+    "power_solar_to_house": "solar_to_house_power",
 }
 
 # MQTT lifetime counters behind contract roles. They cost no cloud requests, so S-INV

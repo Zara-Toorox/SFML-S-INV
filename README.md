@@ -42,6 +42,8 @@ Status: **tested** = runs on real devices; **protocol** = built from the manufac
 | Deye | String inverter (0x0200) | Solarman V5 (port 8899) or Modbus TCP (port 502), read only | IP address; for Solarman V5 also the logger serial | built from community register maps – please report deviations |
 | Deye | Microinverter (0x0400) | Solarman V5 (port 8899) or Modbus TCP (port 502), read only | IP address; for Solarman V5 also the logger serial | built from community register maps – please report deviations |
 | Solplanet | String and hybrid (device type 1 or 3) | Modbus TCP input registers, port 502 (Ai-logger also 9999), unit 3 or 239, read only | IP address | built from AISWEI protocol MB001 V2.1.3; Ai-Dongle (port 8484) not yet supported; grid, house and battery power signs are not stated |
+| Enphase | IQ8AC and other IQ microinverters behind an IQ Gateway (software 7.x or later), optional production and net-consumption CTs | Local network (IQ Gateway local API over HTTPS with owner token), read only | IP address, gateway serial number, owner access token from entrez.enphaseenergy.com | built from the Enphase technical brief on token-based local access; per-inverter power only, refreshed about every 5 minutes |
+| Sigenergy | Sigen Hybrid SP/SP2/TP/TP2, SigenStor EC (hybrid inverters with battery and grid sensor) | Modbus TCP input registers, port 502, inverter address (1–246) plus plant address 247, read only | IP address, Modbus TCP server enabled in the MySigen app | built from Sigenergy Modbus Protocol V2.9; one inverter per plant, battery power only when that inverter holds the plant battery |
 | Maxxisun | MaxxiCharge (CCU firmware .44-.48) | Local: CCU pushes to a Home Assistant webhook | maxxisun app: local server + API route | built from protocol |
 
 Grid values (import, export) require a meter connected to the inverter or battery, as described in the setup dialog of each manufacturer.
@@ -122,7 +124,7 @@ S-INV contains the full Anker Solix support of the upstream integration:
 - Solarbank: A17C0, A17C1, A17C2, A17C3, A17C5
 - Power Dock AE100
 - Inverters MI60 (A5140) and MI80 (A5143)
-- Smart meters A17X7, A17X7US, AE1X0, AE1R0, Shelly 3EM and 3EM Pro. The installation grid-energy totals follow the Solarbank counters and use a smart meter only after those Solarbank counters have been missing for 15 minutes, without a jump when the source changes.
+- Smart meters A17X7, A17X7US, AE1X0, AE1R0, Shelly 3EM and 3EM Pro. The installation grid-energy totals follow the Solarbank counters and use a smart meter only after those Solarbank counters have been missing for 15 minutes, without a jump when the source changes. Anker does not publish power-flow roles; those fields stay vendor values and the installation derives the flows.
 - Smart plug A17X8
 - Portable power stations (PPS), including Solarbank PPS A1782
 - Power panel A17B1
