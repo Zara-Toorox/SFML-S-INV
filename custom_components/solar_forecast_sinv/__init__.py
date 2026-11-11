@@ -103,6 +103,7 @@ from .hoymiles_dtu_coordinator import HoymilesDtuCoordinator
 from .huawei_coordinator import HuaweiCoordinator
 from .kostal_coordinator import KostalCoordinator
 from .maxxisun_coordinator import MaxxisunCoordinator
+from .mtec_coordinator import MtecCoordinator
 from .opendtu_coordinator import OpenDtuCoordinator
 from .services import async_setup_services  # async_remove_services
 from .solakon_coordinator import SolakonCoordinator
@@ -137,6 +138,7 @@ LOCAL_COORDINATORS = {
     "local_emsesp": EmsespCoordinator,
     "ha_bridge": HpBridgeCoordinator,
     "local_modbus_stiebel": StiebelCoordinator,
+    "local_modbus_mtec": MtecCoordinator,
 }
 # Polled energy devices that may switch off at night; heat pumps and the push
 # webhook never sleep.
@@ -145,6 +147,7 @@ SLEEP_CONNECTIONS = frozenset(LOCAL_COORDINATORS) - {
     "local_emsesp",
     "ha_bridge",
     "local_modbus_stiebel",
+    "local_modbus_mtec",
 }
 SITE_PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SWITCH]
 HP_PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
@@ -317,6 +320,10 @@ async def _async_setup_local_entry(hass: HomeAssistant, entry: ConfigEntry) -> b
 
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload a local-API instance after its options changed. @zara"""
+    coordinator = getattr(entry, "runtime_data", None)
+    # Deye stores the PV inputs it has seen in the entry data. That write alone is no reason to reload.
+    if isinstance(coordinator, DeyeCoordinator) and coordinator.config_unchanged(entry):
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 

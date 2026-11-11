@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Zara-Toorox/SFML-S-INV"><img src="https://img.shields.io/badge/version-6.0.0-blue.svg" alt="Version"></a>
+  <a href="https://github.com/Zara-Toorox/SFML-S-INV"><img src="https://img.shields.io/badge/version-10.0.0-blue.svg" alt="Version"></a>
   <a href="https://github.com/Zara-Toorox/SFML-S-INV"><img src="https://img.shields.io/badge/status-Early%20BETA-orange.svg" alt="Early BETA"></a>
   <a href="https://hacs.xyz/"><img src="https://img.shields.io/badge/HACS-Custom-orange.svg" alt="HACS"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Proprietary%20Non--Commercial-green.svg" alt="License"></a>
@@ -112,7 +112,7 @@ You are not locking yourself into SFML. You are getting a **neutral solar vocabu
 | **Read only (local brands)** | Local connections only read values; S-INV does not change inverter settings there. |
 | **S-INV Anlage** | Combines every S-INV entry into one set of totals — ready for the energy dashboard. |
 | **Mix brands** | Fronius on the roof, Hoymiles on the balcony, Zendure in the shed — one vocabulary. |
-| **Heat pumps (S-INV HP)** | Optional aggregate beside the inverter installation (e.g. Bosch/Buderus via EMS-ESP, Stiebel via ISG, or a bridge to an existing HP integration). |
+| **Heat pumps (S-INV HP)** | Optional aggregate beside the inverter installation (e.g. Bosch/Buderus via EMS-ESP, Stiebel via ISG, M-TEC via Modbus TCP, or a bridge to an existing HP integration). |
 | **Energy Dashboard ready** | Creates the solar / grid / battery sensors Home Assistant expects so you can adopt them straight away. |
 | **One click with STATS** | Solar Forecast STATS can assign S-INV roles in one click (compare, tick, undo). SFML remains optional. |
 | **Honest values** | Prefer a missing reading over a fake zero or unclear battery sign; derived flows are labelled as derived. |

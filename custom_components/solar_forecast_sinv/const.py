@@ -53,6 +53,7 @@ VENDOR_SIGENERGY: Final[str] = "sigenergy"
 VENDOR_EMSESP: Final[str] = "emsesp"
 VENDOR_HP_BRIDGE: Final[str] = "hp_bridge"
 VENDOR_STIEBEL: Final[str] = "stiebel_isg"
+VENDOR_MTEC: Final[str] = "mtec"
 # vendors read over a local network API, one instance per config entry
 LOCAL_VENDORS: Final[tuple[str, ...]] = (
     VENDOR_FRONIUS,
@@ -71,6 +72,7 @@ LOCAL_VENDORS: Final[tuple[str, ...]] = (
     VENDOR_EMSESP,
     VENDOR_HP_BRIDGE,
     VENDOR_STIEBEL,
+    VENDOR_MTEC,
 )
 VENDOR_CONNECTIONS: Final[dict[str, tuple[str, ...]]] = {
     "anker": ("cloud",),
@@ -90,6 +92,7 @@ VENDOR_CONNECTIONS: Final[dict[str, tuple[str, ...]]] = {
     VENDOR_EMSESP: ("local_emsesp",),
     VENDOR_HP_BRIDGE: ("ha_bridge",),
     VENDOR_STIEBEL: ("local_modbus_stiebel",),
+    VENDOR_MTEC: ("local_modbus_mtec",),
 }
 # First setup step: one list entry per supported system (vendor, connection)
 CONF_SYSTEM: Final[str] = "system"
@@ -116,12 +119,13 @@ SUPPORTED_SYSTEMS: Final[dict[str, tuple[str, str]]] = {
 # inverter list as the first step. A registered system shows the WR/HP menu.
 VENDOR_HP: Final[str] = "hp"
 HP_DEVICE_VENDORS: frozenset[str] = frozenset(
-    {VENDOR_EMSESP, VENDOR_HP_BRIDGE, VENDOR_STIEBEL}
+    {VENDOR_EMSESP, VENDOR_HP_BRIDGE, VENDOR_STIEBEL, VENDOR_MTEC}
 )
 SUPPORTED_HP_SYSTEMS: dict[str, tuple[str, str]] = {
     "bosch_emsesp": (VENDOR_EMSESP, "local_emsesp"),
     "hp_bridge": (VENDOR_HP_BRIDGE, "ha_bridge"),
     "stiebel_isg": (VENDOR_STIEBEL, "local_modbus_stiebel"),
+    "mtec": (VENDOR_MTEC, "local_modbus_mtec"),
 }
 
 
@@ -132,6 +136,8 @@ def is_hp_device_vendor(vendor: str | None) -> bool:
 
 CONF_WEBHOOK_ID: Final[str] = "webhook_id"
 CONF_LOGGER_SERIAL: Final[str] = "logger_serial"
+# Deye String/Micro: PV inputs 3 and 4 seen active, {"<serial>": [3, 4]}
+CONF_DEYE_MPPT_SEEN: Final[str] = "deye_mppt_seen"
 MANUFACTURER: Final[str] = "Anker"
 ATTRIBUTION: Final[str] = "Data provided by Anker Solix Api"
 ACCEPT_TERMS: Final[str] = "accept_terms"

@@ -438,6 +438,37 @@ Lifetime runtime is not published. Register 535 is an unlabeled hour counter (`f
 3517–3522 are capped at 999 h (`fts.txt:1508`) and wrap, so they are not a lifetime total. NHZ heat
 amounts (3507–3510) are not added to the compressor heat totals.
 
+### M-TEC via Modbus TCP
+
+Read only. Source: M-TEC "Modbus Interface Variables" 20220112
+(`.agents/evidence/vendor_docs/mtec/mtec_modbus_datapoints_20220112.txt`). The controller answers function 03
+(holding registers) on port 502, unit 1. Addresses start at 0 and are requested as listed. A read that crosses an
+unconfigured address answers exception 2, so S-INV reads only configured ranges: 700–719 (heat pump 1) and
+1501–1502 (outdoor) every cycle, and 0–2 (heating circuit 1 room), 400–401 (hot-water tank 1) and 600–601 (buffer 1)
+while the controller answers them. A block that answers exception 2 is not asked again. The Modbus server starts
+with the first socket, so the first answer may take up to 10 s; the read timeout is 12 s.
+
+The controller multiplies by the listed factor and cuts to an integer. Temperatures carry factor 10 and are signed.
+A message id other than 0 (outdoor 1501, flow 704, room 0, tank 400, buffer 600) marks a sensor fault; that value is
+absent. Return 710 and source-in 708 have no message id.
+
+| Role | Register | Note |
+|---|---|---|
+| `hp_power_electric` | 707 (W) | |
+| `hp_energy_thermal_total` | 701 kWh with 715 whole MWh | the MWh register selects the 1000 kWh window and undoes a 16-bit wrap of the kWh register; a kWh value outside the window is dropped |
+| `hp_energy_electric_total` | 702 kWh with 716 whole MWh | same rule |
+| `hp_runtime_total` | 700 (h) | |
+| `hp_operating_mode` | 703 heatpumpState | 0, 1, 5 off; 2 heating; 3 defrost; 4 cooling; 7, 8 and others unknown |
+| `hp_compressor_running` | 703 | true in states 2, 3 and 4 |
+| `hp_temperature_outdoor` / `_flow` / `_return` / `_source` | 1502 / 705 / 710 / 708 | |
+| `hp_temperature_dhw` / `_storage` | 401 / 601 | tank 1 top, buffer 1 top |
+| `hp_temperature_indoor` / `_target` | 1 / 2 | heating circuit 1; the set value only with a working room sensor |
+
+Heat pump 1 only; cascade units 2–4 (from 725) are not published. The thermal power register 706 reports whole kW
+and is not published, so `hp_cop_live` is not derived; `hp_cop_total` is derived on the aggregate from the totals.
+A total that moves backwards is dropped for that cycle. Writable registers (SG Ready, set values, excess energy)
+are never written.
+
 A total is the MWh register times 1000 plus the kWh register. The pair shares one object name; the kWh
 register stops at 999 and the next register is MWh (`fts.txt:1493`–`1494`). Both words are in the single
 read 3501–3516. A new total lower than the last accepted total is dropped for that cycle and is not
@@ -491,7 +522,7 @@ no midnight timer. Falling asleep and waking up are logged once each at info lev
 ## Planned
 
 Wallboxes (e.g. Fronius Wattpilot) as further S-INV instances. Heat-pump manufacturers connected so far are
-Bosch/Buderus via EMS-ESP, Stiebel Eltron via the ISG, and any other heat pump through the bridge. Further
+Bosch/Buderus via EMS-ESP, Stiebel Eltron via the ISG, M-TEC via Modbus TCP, and any other heat pump through the bridge. Further
 manufacturers fill the same role family.
 
 ## Versioning
@@ -527,6 +558,7 @@ the installation entry that creates the system entities.
 | maxxisun MaxxiCharge | Local webhook (CCU pushes JSON, firmware .44 to .48, read only) | `power_solar`, `power_solar_mppt_NN`, `power_inverter_ac_output`, `power_grid`, `power_grid_import`, `power_grid_export`, `power_house` (derived), `power_battery`, `power_battery_charge`, `power_battery_discharge` (derived), `battery_soc`, `battery_pack_soc_NN`, `temperature_inverter` |
 | Bosch/Buderus | Local EMS-ESP HTTP, read only, no token | every S-INV HP role the gateway reports; see the EMS-ESP table under S-INV HP. COP and day counters are derived |
 | Stiebel Eltron | Local ISG Modbus TCP, function 04 only, port 502, unit 1 | the plant roles in the Stiebel table under S-INV HP. No electric power, so live COP is absent; `hp_cop_total` is derived from the energy totals. Day counters come from the ISG |
+| M-TEC | Local Modbus TCP, function 03 only, port 502, unit 1 | the roles in the M-TEC table under S-INV HP (heat pump 1). No thermal power, so live COP is absent; `hp_cop_total` is derived from the energy totals. Day counters are derived |
 | Other heat pump | Bridge to an existing Home Assistant integration, read only | the roles the user maps; units converted to the contract. COP and unmapped day counters are derived |
 
 Fronius: one S-INV instance per Solar API address (a Datamanager or a GEN24). Every listed inverter is its own inverter device with its own serial. Site values (`power_house`, the grid fallback, the meter, the battery, `autonomy`, `self_consumption`) are published only on the primary inverter, the one whose serial is the entry serial. With several inverters and no battery, `power_solar` is that inverter's PowerFlow `Inverters[id].P`, set only when present, and `Site.P_PV` is not used; with a battery, `Site.P_PV` is on the primary only and the others have no `power_solar`. A second entry for an inverter on the same address is not used: it would duplicate the site values and the meter, and `house_plus_foreign_ac` would add that inverter's `power_ac_net` to a `P_Load` that already contains it. Sign conventions of the Solar API are converted: `power_battery` = −`P_Akku`, `power_house` = −`P_Load`; the inverter AC energy `TOTAL_ENERGY` includes battery discharge on hybrid inverters and is therefore published as `sinv_fronius_inverter_energy_total`, not as `energy_solar_total`. A meter outside the grid point never provides grid roles.
