@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Zara-Toorox/SFML-S-INV"><img src="https://img.shields.io/badge/version-10.0.0-blue.svg" alt="Version"></a>
+  <a href="https://github.com/Zara-Toorox/SFML-S-INV"><img src="https://img.shields.io/badge/version-10.0.2-blue.svg" alt="Version"></a>
   <a href="https://github.com/Zara-Toorox/SFML-S-INV"><img src="https://img.shields.io/badge/status-Early%20BETA-orange.svg" alt="Early BETA"></a>
   <a href="https://hacs.xyz/"><img src="https://img.shields.io/badge/HACS-Custom-orange.svg" alt="HACS"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Proprietary%20Non--Commercial-green.svg" alt="License"></a>
@@ -145,7 +145,7 @@ Status: **tested** = runs on real devices; **protocol** = built from documentati
 | **Huawei** SUN2000 + LUNA2000 | Modbus TCP | protocol |
 | **Solakon** ONE | Modbus TCP | protocol |
 | **Deye** hybrid / string / micro | Solarman V5 or Modbus TCP | protocol / community maps |
-| **Solplanet** | Modbus TCP | protocol |
+| **Solplanet** | Modbus TCP or Ai-Dongle (local HTTP) | protocol / community map |
 | **Enphase** IQ Gateway (local token) | Local HTTPS | protocol |
 | **Sigenergy** Sigen Hybrid / SigenStor | Modbus TCP | protocol |
 | **Maxxisun** MaxxiCharge | Local webhook from CCU | protocol |
