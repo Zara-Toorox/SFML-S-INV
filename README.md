@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Zara-Toorox/SFML-S-INV"><img src="https://img.shields.io/badge/version-10.0.2-blue.svg" alt="Version"></a>
+  <a href="https://github.com/Zara-Toorox/SFML-S-INV"><img src="https://img.shields.io/badge/version-12.0.0-blue.svg" alt="Version"></a>
   <a href="https://github.com/Zara-Toorox/SFML-S-INV"><img src="https://img.shields.io/badge/status-Early%20BETA-orange.svg" alt="Early BETA"></a>
   <a href="https://hacs.xyz/"><img src="https://img.shields.io/badge/HACS-Custom-orange.svg" alt="HACS"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Proprietary%20Non--Commercial-green.svg" alt="License"></a>
